@@ -23,12 +23,7 @@
     {
       "name": "house-style",
       "source": "./mods/house-style",
-      "description": "Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words"
-    },
-    {
-      "name": "wiki-sources",
-      "source": "./mods/wiki-sources",
-      "description": "Say under each answer whether it came from your wiki, the web or Claude's own knowledge, and show whether the wiki server is up"
+      "description": "Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words. It enforces the author's own style: see the note below the table."
     }
   ]
 }

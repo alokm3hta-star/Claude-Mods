@@ -76,7 +76,7 @@ const lineAt = (text: string, index: number) => text.slice(0, index).split('\n')
 export const allowed = (text: string): Set<string> => {
   const off = new Set<string>()
   if (/<!--\s*house-style:\s*off\s*-->/i.test(text)) ['dashes', 'spelling', 'words'].forEach(c => off.add(c))
-  for (const m of text.matchAll(/<!--\s*allow:\s*([a-z, ]+?)\s*-->/gi)) for (const c of m[1].split(/[ ,]+/)) off.add(c.toLowerCase())
+  for (const m of text.matchAll(/<!--\s*allow:\s*([a-z, ]+?)\s*-->/gi)) for (const c of (m[1] ?? '').split(/[ ,]+/)) off.add(c.toLowerCase())
   return off
 }
 

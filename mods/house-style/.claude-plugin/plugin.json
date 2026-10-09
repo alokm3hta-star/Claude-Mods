@@ -1,7 +1,7 @@
 {
   "name": "house-style",
-  "version": "0.1.0",
-  "description": "Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words",
+  "version": "0.1.1",
+  "description": "Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words. It enforces the author's own style: see the note below the table.",
   "author": {
     "name": "Alok Mehta"
   }
