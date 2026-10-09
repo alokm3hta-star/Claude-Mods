@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { bar, cacheFrom, colourFor, hitRate, minutesLeft } from './register'
+import { bar, cacheFrom, cacheState, colourFor, hitRate, minutesLeft } from './register'
 
 test('bar fills in proportion to the percentage', async () => {
   expect(bar(0, 10)).toBe('░░░░░░░░░░')
@@ -43,4 +43,11 @@ test('countdown starts when the last request went out, not when the turn ended',
   expect(c.at).toBe(sent)
   expect(minutesLeft(c, ended)).toBe(50)
   expect(cacheFrom(usage, null, ended).at).toBe(ended)
+})
+
+test('a model switch since the last request shows the cache as cold', async () => {
+  expect(cacheState(30, 'opus', 'opus')).toBe('warm')
+  expect(cacheState(30, 'opus', 'sonnet')).toBe('model-changed')
+  expect(cacheState(0, 'opus', 'sonnet')).toBe('cold')
+  expect(cacheState(30, null, 'opus')).toBe('warm')
 })

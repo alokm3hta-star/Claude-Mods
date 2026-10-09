@@ -12,6 +12,10 @@ const fill = atom({ plugin: 'context-bar', key: 'fill' } as const, null)
 const cache = atom({ plugin: 'context-bar', key: 'cache' } as const, null)
 const now = atom({ plugin: 'context-bar', key: 'now' } as const, 0)
 const requestAt = atom({ plugin: 'context-bar', key: 'requestAt' } as const, null)
+// The model the last request went to, and the session's model now. The cache
+// belongs to one model, so a switch leaves the next message without it.
+const requestModel = atom({ plugin: 'context-bar', key: 'requestModel' } as const, null)
+const model = atom({ plugin: 'context-bar', key: 'model' } as const, null)
 
 const toFill = (c: { tokens?: number; window: number; percent?: number }): Fill | null =>
   c.tokens === undefined ? null : { tokens: c.tokens, window: c.window, percent: c.percent ?? Math.round((c.tokens / c.window) * 100) }
@@ -42,15 +46,24 @@ export const cacheFrom = (
 
 export const minutesLeft = (c: Cache, at: number) => Math.max(0, Math.ceil(CACHE_TTL_MIN - (at - c.at) / 60000))
 
+export type CacheState = 'warm' | 'cold' | 'model-changed'
+
+export const cacheState = (minutes: number, sentWith: string | null, current: string | null): CacheState =>
+  minutes <= 0 ? 'cold' : sentWith !== null && current !== null && sentWith !== current ? 'model-changed' : 'warm'
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const usage = await $.session.usage()
     await update($, fill, () => toFill(usage.context))
     const start = await $.clock.now()
     await update($, now, () => start)
-    // Redraw every 30s so the cache countdown stays honest while idle.
+    const m = await $.session.model()
+    await update($, model, () => m)
+    // Redraw every 30s so the cache countdown stays honest while idle, and
+    // pick up a model switch made since the last request.
     $.clock.every(30000, () => {
       void $.clock.now().then(t => update($, now, () => t))
+      void $.session.model().then(m => update($, model, () => m))
     })
     return next(e)
   })
@@ -66,6 +79,9 @@ export const register: Register = on => {
     if (!e.agentId) {
       const t = await $.clock.now()
       await update($, requestAt, () => t)
+      const m = await $.session.model()
+      await update($, requestModel, () => m)
+      await update($, model, () => m)
     }
     return yield* next(e)
   })
@@ -87,12 +103,15 @@ export const register: Register = on => {
     const f = await read($, fill)
     const c = await read($, cache)
     const t = await read($, now)
+    const sentWith = await read($, requestModel)
+    const current = await read($, model)
     const { Box, Text } = $.ui.resolve(e)
 
     const pct = f?.percent ?? 0
     const barColour = colourFor(pct)
     const left = c ? minutesLeft(c, t) : 0
-    const isWarm = c !== null && left > 0
+    const state = c ? cacheState(left, sentWith, current) : 'cold'
+    const cacheLabel = state === 'warm' ? `● warm, ${left}m left` : state === 'model-changed' ? '○ cold, model changed' : '○ cold'
     const rate = c ? hitRate(c) : null
 
     return (
@@ -103,7 +122,7 @@ export const register: Register = on => {
         <Text dimColor>  ·  Cache hit </Text>
         <Text>{rate === null ? '–' : `${rate}%`}</Text>
         <Text dimColor>  ·  </Text>
-        <Text color={isWarm ? 'success' : 'inactive'}>{isWarm ? `● warm, ${left}m left` : '○ cold'}</Text>
+        <Text color={state === 'warm' ? 'success' : 'inactive'}>{cacheLabel}</Text>
       </Box>
     )
   })
