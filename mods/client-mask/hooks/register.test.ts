@@ -159,3 +159,18 @@ test("a reply on screen shows the real name; what reached the model does not cha
   expect(drawn).toBe('Hello **Northwind Revenue**🔒')
   await ui.unmount()
 })
+
+test('the band offers the grouped-names switch, and pressing it sets this session', async ($, on) => {
+  disk(on, JSON.stringify({ terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }, { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] }] }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  expect(await ui.find({ type: 'Button', label: '● group' })).toBeDefined()
+  await ui.press({ key: 'groups-individual' })
+  expect(await ui.find({ type: 'Button', label: '● individual' })).toBeDefined()
+  await ui.unmount()
+})

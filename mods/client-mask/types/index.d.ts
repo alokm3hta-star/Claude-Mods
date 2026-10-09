@@ -1,6 +1,6 @@
 export type GroupMode = 'group' | 'individual' | 'off'
 
-export type MaskStatus = { level: 'on' | 'off' | 'broken'; names: number; detectors: number; folders: number }
+export type MaskStatus = { level: 'on' | 'off' | 'broken'; names: number; detectors: number; folders: number; grouped: number }
 
 declare module 'claude-code' {
   interface PluginState {

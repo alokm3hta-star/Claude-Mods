@@ -93,6 +93,7 @@ const publish = async ($: EngineInterface) => {
     names: masker?.termCount ?? 0,
     detectors: masker?.detectorCount ?? 0,
     folders: config?.blockedFolders?.length ?? 0,
+    grouped: masker?.groupedCount ?? 0,
   }
   const key = JSON.stringify(s)
   if (key === shown) return
@@ -379,7 +380,8 @@ export const register: Register = on => {
     const s = await read($, statusAtom)
     if (s === null) return below
     const n = await read($, maskedAtom)
-    const { Box, Text } = $.ui.resolve(e)
+    const mode = await read($, groupsAtom)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const plural = (k: number, one: string) => `${k} ${one}${k === 1 ? '' : 's'}`
     const line =
       s.level === 'broken' ? (
@@ -396,13 +398,41 @@ export const register: Register = on => {
           </Text>
         </Text>
       )
-    return below ? (
+    // Pick, for this session, how "onlyWith" names are masked; shown only when
+    // the list has some.
+    const groups =
+      s.level === 'on' && s.grouped > 0 ? (
+        <Box flexDirection="row">
+          <Text dimColor>{`   Grouped names (${s.grouped}): `}</Text>
+          {GROUP_MODES.map(m => (
+            <Button
+              key={`groups-${m}`}
+              label={m === mode ? `● ${m}` : m}
+              plain
+              dimColor={m !== mode}
+              onPress={async () => {
+                await update($, groupsAtom, () => m)
+                if (masker) masker.groupMode = m
+              }}
+            />
+          ))}
+        </Box>
+      ) : null
+    const mine = groups ? (
       <Box flexDirection="column">
-        {below}
         {line}
+        {groups}
       </Box>
     ) : (
       line
+    )
+    return below ? (
+      <Box flexDirection="column">
+        {below}
+        {mine}
+      </Box>
+    ) : (
+      mine
     )
   })
 

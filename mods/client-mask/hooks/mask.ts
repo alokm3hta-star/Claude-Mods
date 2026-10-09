@@ -171,6 +171,11 @@ export class Masker {
     return rule.when.some(re => re.test(text))
   }
 
+  // How many rows carry "onlyWith".
+  get groupedCount() {
+    return this.rules.filter(rule => rule.when).length
+  }
+
   get termCount() {
     return this.rules.length
   }
