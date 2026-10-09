@@ -16,7 +16,7 @@ const disk = (on: On, text = JSON.stringify(LIST)) => {
   const files: Record<string, string> = { [LIST_PATH]: text }
   mock.env(on, { HOME })
   mock.clock(on)
-  on('fs.exists', ($, e) => ({ value: e.path in files }))
+  on('fs.exists', ($, e) => ({ value: e.path in files || Object.keys(files).some(f => f.startsWith(`${e.path}/`)) }))
   on('fs.stat', () => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false } }))
   on('fs.read', ($, e) => ({ value: files[e.path] ?? '' }))
   on('fs.write', ($, e) => {
@@ -125,7 +125,7 @@ test('the band shows that masking is on, on terminal and desktop', async ($, on)
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'client-mask', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
-    expect(await ui.find({ type: 'Button', label: '🔒 Masking on · group' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', label: '🔒 Masking on' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /2 names/ })).toBeDefined()
     await ui.unmount()
   }
@@ -160,7 +160,7 @@ test("a reply on screen shows the real name; what reached the model does not cha
   await ui.unmount()
 })
 
-test('the masking button steps through on (group), on (individual) and off', async ($, on) => {
+test('the masking button switches masking off and back on', async ($, on) => {
   disk(on, JSON.stringify({ terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }, { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] }] }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
@@ -170,13 +170,11 @@ test('the masking button steps through on (group), on (individual) and off', asy
   on('ui.toast', () => undefined as never)
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
-  expect(await ui.find({ type: 'Button', label: '🔒 Masking on · group' })).toBeDefined()
-  await ui.press({ key: 'mask' })
-  expect(await ui.find({ type: 'Button', label: '🔒 Masking on · individual' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', label: '🔒 Masking on' })).toBeDefined()
   await ui.press({ key: 'mask' })
   expect(await ui.find({ type: 'Button', label: '⚠ Masking off' })).toBeDefined()
   await ui.press({ key: 'mask' })
-  expect(await ui.find({ type: 'Button', label: '🔒 Masking on · group' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', label: '🔒 Masking on' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -195,7 +193,6 @@ test('while masking is off for the session, placeholders are no longer swapped',
   })
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
-  await ui.press({ key: 'mask' })
   await ui.press({ key: 'mask' })
   expect(await ui.find({ type: 'Button', label: '⚠ Masking off' })).toBeDefined()
   await $.tool.call({ tool: 'Write', file_path: '/x/CLIENT_3.md', content: 'hi' } as never)

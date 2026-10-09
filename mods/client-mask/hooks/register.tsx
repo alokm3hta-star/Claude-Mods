@@ -1,16 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { BINARY_FILE, GROUP_MODES, Masker, REMOVED, mapStrings, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, Masker, REMOVED, mapStrings, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
-import type { GroupMode, MaskStatus } from '../types'
+import { scrubFile } from './scrub'
+import type { MaskStatus } from '../types'
 
 // Your list lives outside every repository, in your home folder, and never in
 // chat. Claude is refused any tool call that names its folder.
 const DIR = '.claude/client-mask'
 const VIEW = 'client-mask-view'
 const EDIT = 'client-mask-edit'
-const GROUPS = 'client-mask-groups'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -36,17 +36,8 @@ const TEMPLATE = {
 // items the last message carried masked. Counts only, never what was masked.
 const statusAtom = atom({ plugin: 'client-mask', key: 'status' } as const, null)
 const maskedAtom = atom({ plugin: 'client-mask', key: 'masked' } as const, 0)
-// This session's choice for "onlyWith" rows; a new session starts at 'group'.
-const groupsAtom = atom({ plugin: 'client-mask', key: 'groups' } as const, 'group' as GroupMode)
-const GROUP_HELP: Record<GroupMode, string> = {
-  group: 'masked only as a group, when their companion is in the same message or file',
-  individual: 'masked individually, wherever each appears',
-  off: 'not masked, even next to their companion',
-}
 // This session only: masking switched off from the band. A new session starts on.
 const pausedAtom = atom({ plugin: 'client-mask', key: 'paused' } as const, false)
-// What the masking button says for each grouped-names setting.
-const MODE_LABEL: Record<GroupMode, string> = { group: 'group', individual: 'individual', off: 'groups not masked' }
 
 let masker: Masker | null = null
 let markedSession = ''
@@ -98,7 +89,6 @@ const publish = async ($: EngineInterface) => {
     names: masker?.termCount ?? 0,
     detectors: masker?.detectorCount ?? 0,
     folders: config?.blockedFolders?.length ?? 0,
-    grouped: masker?.groupedCount ?? 0,
   }
   const key = JSON.stringify(s)
   if (key === shown) return
@@ -121,7 +111,6 @@ const markSession = async ($: EngineInterface) => {
 // Never throws: a list it cannot read stops sending rather than sending unmasked.
 const ensure = async ($: EngineInterface) => {
   await load($)
-  if (masker) masker.groupMode = await read($, groupsAtom)
   paused = await read($, pausedAtom)
   try {
     await markSession($)
@@ -188,6 +177,54 @@ const openList = async ($: EngineInterface) => {
 const stopped = () =>
   `client-mask stopped this: ${broken}. Fix it with /client-mask-edit; nothing is sent until it reads cleanly.`
 
+// Saved conversations and typed-prompt history are kept, cleaned of any name
+// from your list. Only a list that reads cleanly is used for the clean-up.
+const IDLE_MS = 5 * 60 * 1000
+const RECENT_MS = 2 * 24 * 60 * 60 * 1000
+
+// Cleans one saved file in place. Skipped when the file changed while it was
+// read (a session still writing to it); the next clean-up catches it.
+const scrubPath = async ($: EngineInterface, path: string) => {
+  if (!masker || broken || config?.enabled === false) return
+  const m = masker
+  try {
+    const before = await $.fs.stat(path)
+    const { text, changed } = scrubFile(await $.fs.read(path), s => m.mask(s))
+    if (!changed) return
+    const after = await $.fs.stat(path)
+    if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return
+    const tmp = `${path}.client-mask-tmp`
+    await $.fs.write(tmp, text)
+    await $.process.run(['chmod', '600', tmp])
+    await $.process.run(['mv', '-f', tmp, path])
+  } catch {
+    // A file that cannot be cleaned now is tried again at the next start.
+  }
+}
+
+// Every saved conversation file (subagents' included) whose session `pick` takes.
+const savedConversations = async ($: EngineInterface, pick: (session: string, mtimeMs: number) => boolean) => {
+  const root = `${home}/.claude/projects`
+  const found: string[] = []
+  if (!home || !(await $.fs.exists(root))) return found
+  for (const project of await $.fs.list(root)) {
+    if (project.kind !== 'dir') continue
+    const dir = `${root}/${project.name}`
+    for (const f of await $.fs.list(dir)) {
+      if (f.kind === 'file' && f.name.endsWith('.jsonl') && pick(f.name.slice(0, -6), f.mtimeMs)) found.push(`${dir}/${f.name}`)
+      if (f.kind !== 'dir') continue
+      const sub = `${dir}/${f.name}/subagents`
+      if (!(await $.fs.exists(sub))) continue
+      for (const s of await $.fs.list(sub)) {
+        if (s.kind === 'file' && s.name.endsWith('.jsonl') && pick(f.name, s.mtimeMs)) found.push(`${sub}/${s.name}`)
+      }
+    }
+  }
+  return found
+}
+
+const scrubHistory = ($: EngineInterface) => (home ? scrubPath($, `${home}/.claude/history.jsonl`) : Promise.resolve())
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await ensure($)
@@ -195,8 +232,26 @@ export const register: Register = on => {
     $.clock.every(5000, () => void ensure($))
     await $.command.register({ name: VIEW, description: 'Show which placeholder stands for which client term (on screen only)' })
     await $.command.register({ name: EDIT, description: 'Open your masking list in your text editor (Claude never sees it)' })
-    await $.command.register({ name: GROUPS, description: 'For this session, mask "onlyWith" names: group (normal), individual, or off' })
+    // Catches conversations that closed without cleaning up (a crash, a forced
+    // quit): recent ones, idle long enough that no session still writes them.
+    void (async () => {
+      const id = await $.session.id()
+      const now = await $.clock.now()
+      const files = await savedConversations($, (s, t) => s !== id && now - t > IDLE_MS && now - t < RECENT_MS)
+      for (const f of files) await scrubPath($, f)
+      await scrubHistory($)
+    })().catch(() => {})
     return next(e)
+  })
+
+  // When a conversation closes, its saved copy is cleaned and kept, so it can
+  // be reopened with no client name in it.
+  on('session.end', async ($, e, next) => {
+    const r = await next(e)
+    await ensure($)
+    for (const f of await savedConversations($, s => s === e.sessionId)) await scrubPath($, f)
+    await scrubHistory($)
+    return r
   })
 
   // 1. What you type.
@@ -318,7 +373,8 @@ export const register: Register = on => {
       if (hits.length > 0) {
         note =
           `client-mask stopped this request: the name behind ${hits.join(', ')} is still in clear text ` +
-          '(usually because the list changed mid-conversation). Start a new session to continue.'
+          '(usually because the list changed mid-conversation). Close Claude Code and reopen this conversation: ' +
+          'its saved copy is cleaned as it closes, so nothing is lost.'
         if (config?.onLeak === 'warn') {
           $.ui.toast(note, { timeoutMs: 10000 })
           note = null
@@ -340,22 +396,6 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: EDIT }, async $ => ({ text: await openList($) }))
-
-  // Sets, for this session only, how "onlyWith" rows behave.
-  on('command.run', { command: GROUPS }, async ($, e) => {
-    const choice = e.args.trim().toLowerCase()
-    if (choice === '') {
-      const now = await read($, groupsAtom)
-      return { text: `Grouped names are ${GROUP_HELP[now]} (${now}). Change it with /${GROUPS} group, individual or off.` }
-    }
-    if (!(GROUP_MODES as readonly string[]).includes(choice)) {
-      return { text: `Use /${GROUPS} group, individual or off.` }
-    }
-    const mode = choice as GroupMode
-    await update($, groupsAtom, () => mode)
-    if (masker) masker.groupMode = mode
-    return { text: `For this session, grouped names are ${GROUP_HELP[mode]}.` }
-  })
 
   // After each answer, a pop-up naming what was masked, by placeholder only.
   on('turn.complete', async ($, e, next) => {
@@ -389,26 +429,19 @@ export const register: Register = on => {
     const s = await read($, statusAtom)
     if (s === null) return below
     const n = await read($, maskedAtom)
-    const mode = await read($, groupsAtom)
     const { Box, Text, Button } = $.ui.resolve(e)
     const plural = (k: number, one: string) => `${k} ${one}${k === 1 ? '' : 's'}`
-    // The masking button: each press moves this session on to the next of
-    // masking on (group), masking on (individual), masking off.
+    // The masking button: each press switches masking on or off for this session.
     const step = async () => {
       if (paused) {
         paused = false
         await update($, pausedAtom, () => false)
-        await update($, groupsAtom, () => 'group' as GroupMode)
-        if (masker) masker.groupMode = 'group'
-      } else if (mode === 'group') {
-        await update($, groupsAtom, () => 'individual' as GroupMode)
-        if (masker) masker.groupMode = 'individual'
       } else {
         paused = true
         await update($, pausedAtom, () => true)
         $.ui.toast(
           'Masking is off for this session: what you send now reaches Claude as written. ' +
-            'If a client name goes out while it is off, switching masking back on means starting a new session.',
+            'If a client name goes out while it is off, switching masking back on means closing and reopening this conversation.',
           { timeoutMs: 10000 },
         )
       }
@@ -440,7 +473,7 @@ export const register: Register = on => {
         </Box>
       ) : (
         <Box flexDirection="row">
-          <Button key="mask" label={`🔒 Masking on · ${MODE_LABEL[mode]}`} plain onPress={step} />
+          <Button key="mask" label="🔒 Masking on" plain onPress={step} />
           <Text dimColor>
             {`  ·  ${plural(s.names, 'name')}  ·  ${plural(s.detectors, 'kind')} of personal data  ·  list locked` +
               (s.folders > 0 ? `  ·  ${plural(s.folders, 'folder')} blocked` : '') +

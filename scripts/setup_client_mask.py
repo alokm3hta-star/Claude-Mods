@@ -9,9 +9,9 @@ then run this once from a clone of the repo:
 
 It merges into ~/.claude/settings.json (a backup is written beside it first):
   - a safety catch that refuses any prompt in a session the mod is not protecting
-  - no saved conversations or typed history, no file backups before edits
+  - saved conversations and typed history kept, cleaned of listed names; no file backups before edits
   - no feedback uploads or error reports
-  - saved data deleted after 7 days
+  - saved data deleted after 30 days
 It never creates or touches your masking list; make that with /client-mask-edit.
 """
 import json
@@ -28,7 +28,6 @@ GUARD_DEST = os.path.join(HOME, ".claude", "hooks", "client_mask_prompt_guard.py
 MASK_FOLDER = os.path.join(HOME, ".claude", "client-mask")
 
 ENV = {
-    "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
     "DISABLE_FEEDBACK_COMMAND": "1",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
     "DISABLE_ERROR_REPORTING": "1",
@@ -43,12 +42,16 @@ for key, value in ENV.items():
     if env.get(key) != value:
         env[key] = value
         changes.append(f"set {key}={value}")
+# This one also stops Claude Code saving conversations at all; the mod now
+# cleans saved conversations of listed names instead, so it is taken out.
+if env.pop("CLAUDE_CODE_SKIP_PROMPT_HISTORY", None) is not None:
+    changes.append("keep saved conversations (the mod cleans names out of them)")
 if settings.get("fileCheckpointingEnabled") is not False:
     settings["fileCheckpointingEnabled"] = False
     changes.append("turn off file backups before edits")
-if settings.get("cleanupPeriodDays") != 7:
-    settings["cleanupPeriodDays"] = 7
-    changes.append("delete saved data after 7 days")
+if settings.get("cleanupPeriodDays") != 30:
+    settings["cleanupPeriodDays"] = 30
+    changes.append("delete saved data after 30 days")
 
 groups = settings.setdefault("hooks", {}).setdefault("UserPromptSubmit", [])
 has_guard = any("prompt_guard" in h.get("command", "") for g in groups for h in g.get("hooks", []))

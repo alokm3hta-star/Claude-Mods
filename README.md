@@ -28,7 +28,7 @@ Answer `y` to add the marketplace, then press Enter to pick the user scope.
 client-mask needs two steps beyond the install line, because some of its protection lives in your Claude Code settings rather than in the mod.
 
 1. Install the mod with the line above, using `client-mask` as the name.
-2. From a clone of this repository, run the setup script once. It switches on the safety catch, which refuses any prompt in a session the mod is not protecting, and stops Claude Code keeping conversations, typed history, file backups, feedback uploads and error reports. It backs up your settings file first.
+2. From a clone of this repository, run the setup script once. It switches on the safety catch, which refuses any prompt in a session the mod is not protecting, keeps saved conversations for 30 days, and stops file backups, feedback uploads and error reports. Saved conversations and typed history are kept; the mod masks any listed name left in them when a conversation closes. It backs up your settings file first.
 
    ```
    python3 scripts/setup_client_mask.py
