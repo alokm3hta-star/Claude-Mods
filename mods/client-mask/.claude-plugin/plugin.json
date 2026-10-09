@@ -1,0 +1,9 @@
+{
+  "name": "client-mask",
+  "version": "0.4.0",
+  "description": "Mask client names, personal data and secrets before anything leaves this machine; keep the list private and leave no trace of what was swapped",
+  "author": {
+    "name": "Alok Mehta"
+  },
+  "types": "./types/index.d.ts"
+}

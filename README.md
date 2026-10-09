@@ -9,6 +9,7 @@ installs any of them.
 <!-- mods:start -->
 | Mod | What it does |
 | --- | --- |
+| [client-mask](mods/client-mask) | Mask client names, personal data and secrets before anything leaves this machine; keep the list private and leave no trace of what was swapped |
 | [context-bar](mods/context-bar) | Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm |
 <!-- mods:end -->
 
@@ -21,6 +22,21 @@ Type this at the prompt of a Claude Code terminal session, replacing `<mod>` wit
 ```
 
 Answer `y` to add the marketplace, then press Enter to pick the user scope.
+
+## Set up client-mask on a new machine
+
+client-mask needs two steps beyond the install line, because some of its protection lives in your Claude Code settings rather than in the mod.
+
+1. Install the mod with the line above, using `client-mask` as the name.
+2. From a clone of this repository, run the setup script once. It switches on the safety catch, which refuses any prompt in a session the mod is not protecting, and stops Claude Code keeping conversations, typed history, file backups, feedback uploads and error reports. It backs up your settings file first.
+
+   ```
+   python3 scripts/setup_client_mask.py
+   ```
+
+3. Restart Claude Code, then type `/client-mask-edit` to add your client names. The list lives in `~/.claude/client-mask/` on your machine only and is never part of this repository.
+
+To check what the script would change without changing anything, add `--dry-run`.
 
 ## Add a new mod
 
