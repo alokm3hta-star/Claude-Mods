@@ -19,7 +19,12 @@ test('cache countdown runs from the last request and stops at zero', async () =>
   expect(minutesLeft(c, 90 * 60000)).toBe(0)
 })
 
-test('the band draws on terminal and desktop', async $ => {
+test('the band draws on terminal and desktop', async ($, on) => {
+  // Beneath the plugin: nothing else draws in the band.
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'context-bar', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 100 } as never })
     expect(await ui.find({ type: 'Text', text: /Context/ })).toBeDefined()

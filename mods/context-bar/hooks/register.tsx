@@ -97,8 +97,10 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Draws its line first, then whatever other plugins draw in the band beneath it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
+    const below = await next(e)
+    if (e.props.hasSurvey) return below
 
     const f = await read($, fill)
     const c = await read($, cache)
@@ -114,7 +116,7 @@ export const register: Register = on => {
     const cacheLabel = state === 'warm' ? `● warm, ${left}m left` : state === 'model-changed' ? '○ cold, model changed' : '○ cold'
     const rate = c ? hitRate(c) : null
 
-    return (
+    const line = (
       <Box flexDirection="row">
         <Text dimColor>Context </Text>
         <Text color={barColour}>{bar(pct)}</Text>
@@ -124,6 +126,14 @@ export const register: Register = on => {
         <Text dimColor>  ·  </Text>
         <Text color={state === 'warm' ? 'success' : 'inactive'}>{cacheLabel}</Text>
       </Box>
+    )
+    return below ? (
+      <Box flexDirection="column">
+        {line}
+        {below}
+      </Box>
+    ) : (
+      line
     )
   })
 }
