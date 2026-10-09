@@ -398,34 +398,27 @@ export const register: Register = on => {
           </Text>
         </Text>
       )
-    // Pick, for this session, how "onlyWith" names are masked; shown only when
-    // the list has some.
-    const groups =
+    // One button at the end of the line: each press moves this session's
+    // grouped-names setting on to the next. Shown only when the list has some.
+    const next_ = GROUP_MODES[(GROUP_MODES.indexOf(mode) + 1) % GROUP_MODES.length]
+    const mine =
       s.level === 'on' && s.grouped > 0 ? (
         <Box flexDirection="row">
-          <Text dimColor>{`   Grouped names (${s.grouped}): `}</Text>
-          {GROUP_MODES.map(m => (
-            <Button
-              key={`groups-${m}`}
-              label={m === mode ? `● ${m}` : m}
-              plain
-              dimColor={m !== mode}
-              onPress={async () => {
-                await update($, groupsAtom, () => m)
-                if (masker) masker.groupMode = m
-              }}
-            />
-          ))}
+          {line}
+          <Text dimColor>{'  ·  '}</Text>
+          <Button
+            key="groups"
+            label={`groups: ${mode}`}
+            plain
+            onPress={async () => {
+              await update($, groupsAtom, () => next_)
+              if (masker) masker.groupMode = next_
+            }}
+          />
         </Box>
-      ) : null
-    const mine = groups ? (
-      <Box flexDirection="column">
-        {line}
-        {groups}
-      </Box>
-    ) : (
-      line
-    )
+      ) : (
+        line
+      )
     return below ? (
       <Box flexDirection="column">
         {below}
