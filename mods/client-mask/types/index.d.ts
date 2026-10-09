@@ -1,4 +1,4 @@
-export type GroupMode = 'together' | 'always' | 'never'
+export type GroupMode = 'group' | 'individual' | 'off'
 
 export type MaskStatus = { level: 'on' | 'off' | 'broken'; names: number; detectors: number; folders: number }
 

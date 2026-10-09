@@ -1,6 +1,6 @@
 {
   "name": "client-mask",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Mask client names, personal data and secrets before anything leaves this machine; keep the list private and leave no trace of what was swapped",
   "author": {
     "name": "Alok Mehta"

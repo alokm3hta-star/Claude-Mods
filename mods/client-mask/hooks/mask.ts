@@ -100,10 +100,10 @@ export const validate = (config: unknown): string[] => {
 // `when`: the rule applies only to a text in which one of these is found.
 type Rule = { re: RegExp; placeholder: string; when?: RegExp[] }
 
-// How "onlyWith" rows behave for one session: masked only together with their
-// companion (the default), always, or never.
-export type GroupMode = 'together' | 'always' | 'never'
-export const GROUP_MODES: readonly GroupMode[] = ['together', 'always', 'never']
+// How "onlyWith" rows behave for one session: masked only as a group with their
+// companion (the default), individually wherever they appear, or not at all.
+export type GroupMode = 'group' | 'individual' | 'off'
+export const GROUP_MODES: readonly GroupMode[] = ['group', 'individual', 'off']
 
 // How a name removed altogether (a blank placeholder) is shown on your screen.
 export const REMOVED = '(removed)'
@@ -117,7 +117,7 @@ export class Masker {
   private readonly removedNames: string[] = []
   // How many names the last mask() call removed altogether.
   removed = 0
-  groupMode: GroupMode = 'together'
+  groupMode: GroupMode = 'group'
 
   constructor(config: Config) {
     this.detector = new Detector(config.detect, [...DEFAULT_KEEP, ...(config.keep ?? [])])
@@ -166,8 +166,8 @@ export class Masker {
   }
 
   private applies(rule: Rule, text: string) {
-    if (!rule.when || this.groupMode === 'always') return true
-    if (this.groupMode === 'never') return false
+    if (!rule.when || this.groupMode === 'individual') return true
+    if (this.groupMode === 'off') return false
     return rule.when.some(re => re.test(text))
   }
 

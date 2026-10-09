@@ -36,12 +36,12 @@ const TEMPLATE = {
 // items the last message carried masked. Counts only, never what was masked.
 const statusAtom = atom({ plugin: 'client-mask', key: 'status' } as const, null)
 const maskedAtom = atom({ plugin: 'client-mask', key: 'masked' } as const, 0)
-// This session's choice for "onlyWith" rows; a new session starts at 'together'.
-const groupsAtom = atom({ plugin: 'client-mask', key: 'groups' } as const, 'together' as GroupMode)
+// This session's choice for "onlyWith" rows; a new session starts at 'group'.
+const groupsAtom = atom({ plugin: 'client-mask', key: 'groups' } as const, 'group' as GroupMode)
 const GROUP_HELP: Record<GroupMode, string> = {
-  together: 'masked only when their companion is in the same message or file',
-  always: 'always masked, even on their own',
-  never: 'never masked, even next to their companion',
+  group: 'masked only as a group, when their companion is in the same message or file',
+  individual: 'masked individually, wherever each appears',
+  off: 'not masked, even next to their companion',
 }
 
 let masker: Masker | null = null
@@ -176,7 +176,7 @@ export const register: Register = on => {
     $.clock.every(5000, () => void ensure($))
     await $.command.register({ name: VIEW, description: 'Show which placeholder stands for which client term (on screen only)' })
     await $.command.register({ name: EDIT, description: 'Open your masking list in your text editor (Claude never sees it)' })
-    await $.command.register({ name: GROUPS, description: 'For this session, mask "onlyWith" names: together (normal), always, or never' })
+    await $.command.register({ name: GROUPS, description: 'For this session, mask "onlyWith" names: group (normal), individual, or off' })
     return next(e)
   })
 
@@ -336,10 +336,10 @@ export const register: Register = on => {
     const choice = e.args.trim().toLowerCase()
     if (choice === '') {
       const now = await read($, groupsAtom)
-      return { text: `Grouped names are ${GROUP_HELP[now]} (${now}). Change it with /${GROUPS} together, always or never.` }
+      return { text: `Grouped names are ${GROUP_HELP[now]} (${now}). Change it with /${GROUPS} group, individual or off.` }
     }
     if (!(GROUP_MODES as readonly string[]).includes(choice)) {
-      return { text: `Use /${GROUPS} together, always or never.` }
+      return { text: `Use /${GROUPS} group, individual or off.` }
     }
     const mode = choice as GroupMode
     await update($, groupsAtom, () => mode)
