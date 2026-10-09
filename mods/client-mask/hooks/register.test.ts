@@ -125,7 +125,7 @@ test('the band shows that masking is on, on terminal and desktop', async ($, on)
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'client-mask', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
-    expect(await ui.find({ type: 'Text', text: /Masking on/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', label: '🔒 Masking on · group' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /2 names/ })).toBeDefined()
     await ui.unmount()
   }
@@ -160,21 +160,72 @@ test("a reply on screen shows the real name; what reached the model does not cha
   await ui.unmount()
 })
 
-test('one button on the band steps the grouped-names setting: group, individual, off', async ($, on) => {
+test('the masking button steps through on (group), on (individual) and off', async ($, on) => {
   disk(on, JSON.stringify({ terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }, { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] }] }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return h(Box, {}) as never
   })
   on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => undefined as never)
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
-  expect(await ui.find({ type: 'Button', label: 'groups: group' })).toBeDefined()
-  await ui.press({ key: 'groups' })
-  expect(await ui.find({ type: 'Button', label: 'groups: individual' })).toBeDefined()
-  await ui.press({ key: 'groups' })
-  expect(await ui.find({ type: 'Button', label: 'groups: off' })).toBeDefined()
-  await ui.press({ key: 'groups' })
-  expect(await ui.find({ type: 'Button', label: 'groups: group' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', label: '🔒 Masking on · group' })).toBeDefined()
+  await ui.press({ key: 'mask' })
+  expect(await ui.find({ type: 'Button', label: '🔒 Masking on · individual' })).toBeDefined()
+  await ui.press({ key: 'mask' })
+  expect(await ui.find({ type: 'Button', label: '⚠ Masking off' })).toBeDefined()
+  await ui.press({ key: 'mask' })
+  expect(await ui.find({ type: 'Button', label: '🔒 Masking on · group' })).toBeDefined()
   await ui.unmount()
+})
+
+test('while masking is off for the session, placeholders are no longer swapped', async ($, on) => {
+  disk(on)
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => undefined as never)
+  let written = ''
+  on('tool.call', ($, e) => {
+    written = JSON.stringify(e)
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  await ui.press({ key: 'mask' })
+  await ui.press({ key: 'mask' })
+  expect(await ui.find({ type: 'Button', label: '⚠ Masking off' })).toBeDefined()
+  await $.tool.call({ tool: 'Write', file_path: '/x/CLIENT_3.md', content: 'hi' } as never)
+  expect(written).toContain('/x/CLIENT_3.md')
+  await ui.unmount()
+})
+
+test('the edit button opens the list in the text editor', async ($, on) => {
+  disk(on)
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text)
+    return undefined as never
+  })
+  const ran: string[][] = []
+  on('process.run', ($, e) => {
+    ran.push([...(e as unknown as { argv: string[] }).argv])
+    return { value: { exitCode: 0, stdout: "", stderr: "" } } as never
+  })
+  await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'client-mask', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+    await ui.press({ key: 'edit' })
+    expect(ran.some(a => a[0] === 'open' && a.includes(LIST_PATH))).toBe(true)
+    expect(toasts.at(-1)).toContain('open in your text editor')
+    await ui.unmount()
+  }
 })

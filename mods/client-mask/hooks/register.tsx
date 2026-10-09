@@ -43,6 +43,10 @@ const GROUP_HELP: Record<GroupMode, string> = {
   individual: 'masked individually, wherever each appears',
   off: 'not masked, even next to their companion',
 }
+// This session only: masking switched off from the band. A new session starts on.
+const pausedAtom = atom({ plugin: 'client-mask', key: 'paused' } as const, false)
+// What the masking button says for each grouped-names setting.
+const MODE_LABEL: Record<GroupMode, string> = { group: 'group', individual: 'individual', off: 'groups not masked' }
 
 let masker: Masker | null = null
 let markedSession = ''
@@ -53,8 +57,9 @@ let home = ''
 let listPath = ''
 let loadedMtime = -1
 let checkedAt = 0
+let paused = false
 
-const isOn = () => broken === null && masker !== null && config?.enabled !== false
+const isOn = () => broken === null && masker !== null && config?.enabled !== false && !paused
 const mask = (s: string) => (isOn() && masker ? masker.mask(s) : s)
 
 // Masks and counts how many items the text gained, by placeholder or label.
@@ -89,7 +94,7 @@ export const swapSummary = (m: ReadonlyMap<string, number>) =>
 let shown = ''
 const publish = async ($: EngineInterface) => {
   const s: MaskStatus = {
-    level: broken ? 'broken' : isOn() ? 'on' : 'off',
+    level: broken ? 'broken' : isOn() ? 'on' : paused && masker !== null && config?.enabled !== false ? 'paused' : 'off',
     names: masker?.termCount ?? 0,
     detectors: masker?.detectorCount ?? 0,
     folders: config?.blockedFolders?.length ?? 0,
@@ -117,6 +122,7 @@ const markSession = async ($: EngineInterface) => {
 const ensure = async ($: EngineInterface) => {
   await load($)
   if (masker) masker.groupMode = await read($, groupsAtom)
+  paused = await read($, pausedAtom)
   try {
     await markSession($)
   } catch {
@@ -165,6 +171,18 @@ const load = async ($: EngineInterface) => {
     broken = message.startsWith('the list') || message.startsWith('row') ? message : 'the list could not be read'
     $.ui.status('⛔ masking list has a problem: nothing will be sent')
   }
+}
+
+// Opens the list in your own text editor; its contents never pass through here.
+// Answers with what happened, for the command's reply or a toast.
+const openList = async ($: EngineInterface) => {
+  await ensure($)
+  if (!(await $.fs.exists(listPath))) {
+    await $.fs.write(listPath, JSON.stringify(TEMPLATE, null, 2) + '\n')
+    await $.process.run(['chmod', '600', listPath])
+  }
+  const { exitCode } = await $.process.run(['open', '-t', listPath])
+  return exitCode === 0 ? 'Your masking list is open in your text editor. Save it and masking picks it up within 5 seconds.' : 'Could not open your text editor.'
 }
 
 const stopped = () =>
@@ -321,16 +339,7 @@ export const register: Register = on => {
     return { text: 'Your list is open in a side panel, on screen only.' }
   })
 
-  // Opens the list in your own text editor; its contents never pass through here.
-  on('command.run', { command: EDIT }, async $ => {
-    await ensure($)
-    if (!(await $.fs.exists(listPath))) {
-      await $.fs.write(listPath, JSON.stringify(TEMPLATE, null, 2) + '\n')
-      await $.process.run(['chmod', '600', listPath])
-    }
-    const { exitCode } = await $.process.run(['open', '-t', listPath])
-    return { text: exitCode === 0 ? 'Your masking list is open in your text editor. Save it and masking picks it up within 5 seconds.' : 'Could not open your text editor.' }
-  })
+  on('command.run', { command: EDIT }, async $ => ({ text: await openList($) }))
 
   // Sets, for this session only, how "onlyWith" rows behave.
   on('command.run', { command: GROUPS }, async ($, e) => {
@@ -383,41 +392,63 @@ export const register: Register = on => {
     const mode = await read($, groupsAtom)
     const { Box, Text, Button } = $.ui.resolve(e)
     const plural = (k: number, one: string) => `${k} ${one}${k === 1 ? '' : 's'}`
-    const line =
+    // The masking button: each press moves this session on to the next of
+    // masking on (group), masking on (individual), masking off.
+    const step = async () => {
+      if (paused) {
+        paused = false
+        await update($, pausedAtom, () => false)
+        await update($, groupsAtom, () => 'group' as GroupMode)
+        if (masker) masker.groupMode = 'group'
+      } else if (mode === 'group') {
+        await update($, groupsAtom, () => 'individual' as GroupMode)
+        if (masker) masker.groupMode = 'individual'
+      } else {
+        paused = true
+        await update($, pausedAtom, () => true)
+        $.ui.toast(
+          'Masking is off for this session: what you send now reaches Claude as written. ' +
+            'If a client name goes out while it is off, switching masking back on means starting a new session.',
+          { timeoutMs: 10000 },
+        )
+      }
+      await publish($)
+    }
+    const editList = async () => {
+      $.ui.toast(await openList($), { timeoutMs: 6000 })
+    }
+    const sep = <Text dimColor>{'  ·  '}</Text>
+    const mine =
       s.level === 'broken' ? (
-        <Text color="error">⛔ Masking list has a problem: nothing will be sent (/client-mask-edit)</Text>
+        <Box flexDirection="row">
+          <Text color="error">⛔ Masking list has a problem: nothing will be sent</Text>
+          {sep}
+          <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
+        </Box>
       ) : s.level === 'off' ? (
-        <Text color="warning">⚠ Masking is switched off</Text>
+        <Box flexDirection="row">
+          <Text color="warning">⚠ Masking is switched off in your list</Text>
+          {sep}
+          <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
+        </Box>
+      ) : s.level === 'paused' ? (
+        <Box flexDirection="row">
+          <Button key="mask" label="⚠ Masking off" plain onPress={step} />
+          <Text color="warning">{'  ·  this session only; click to switch back on'}</Text>
+          {sep}
+          <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
+        </Box>
       ) : (
-        <Text>
-          <Text color="success">🔒 Masking on</Text>
+        <Box flexDirection="row">
+          <Button key="mask" label={`🔒 Masking on · ${MODE_LABEL[mode]}`} plain onPress={step} />
           <Text dimColor>
             {`  ·  ${plural(s.names, 'name')}  ·  ${plural(s.detectors, 'kind')} of personal data  ·  list locked` +
               (s.folders > 0 ? `  ·  ${plural(s.folders, 'folder')} blocked` : '') +
               `  ·  last message: ${n} masked`}
           </Text>
-        </Text>
-      )
-    // One button at the end of the line: each press moves this session's
-    // grouped-names setting on to the next. Shown only when the list has some.
-    const next_ = GROUP_MODES[(GROUP_MODES.indexOf(mode) + 1) % GROUP_MODES.length]
-    const mine =
-      s.level === 'on' && s.grouped > 0 ? (
-        <Box flexDirection="row">
-          {line}
-          <Text dimColor>{'  ·  '}</Text>
-          <Button
-            key="groups"
-            label={`groups: ${mode}`}
-            plain
-            onPress={async () => {
-              await update($, groupsAtom, () => next_)
-              if (masker) masker.groupMode = next_
-            }}
-          />
+          {sep}
+          <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
         </Box>
-      ) : (
-        line
       )
     return below ? (
       <Box flexDirection="column">
