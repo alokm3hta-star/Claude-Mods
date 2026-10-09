@@ -16,6 +16,11 @@
       "description": "Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm"
     },
     {
+      "name": "control-panel",
+      "source": "./mods/control-panel",
+      "description": "Click instead of remembering: a panel of each project's own commands and playbooks, what needs you now, a wiki desk for reading proposals and findings, and where you left off. It never changes how your agents work."
+    },
+    {
       "name": "git-guard",
       "source": "./mods/git-guard",
       "description": "Keep Claude out of your git history: no co-author trailer, no PR footer, and no push of a commit that carries one"

@@ -11,6 +11,7 @@ installs any of them.
 | --- | --- |
 | [client-mask](mods/client-mask) | Mask client names, personal data and secrets before anything leaves this machine; keep the list private and leave no trace of what was swapped |
 | [context-bar](mods/context-bar) | Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm |
+| [control-panel](mods/control-panel) | Click instead of remembering: a panel of each project's own commands and playbooks, what needs you now, a wiki desk for reading proposals and findings, and where you left off. It never changes how your agents work. |
 | [git-guard](mods/git-guard) | Keep Claude out of your git history: no co-author trailer, no PR footer, and no push of a commit that carries one |
 | [house-style](mods/house-style) | Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words. It enforces the author's own style: see the note below the table. |
 <!-- mods:end -->
@@ -20,6 +21,8 @@ installs any of them.
 I built these mods for the way I work, so check that each one suits yours. Mods tied to my own projects are kept out of this repository.
 
 **Ready to use anywhere.** context-bar and git-guard work in any project with no setup. client-mask works anywhere once you have run its setup script and added your own client names, as described below.
+
+**Works from your own project files.** control-panel builds its buttons from each project's `CLAUDE.md` and its `.claude/skills/` playbooks. It reads commands listed in a code block under `GROUP:` headings, one per line as `@agent command [argument]` followed by a long dash and what it does, or in table rows that start with a command in backticks. A command with an `[argument]` fills the prompt for you to finish; the rest run on a click. Its wiki tabs (a proposal reader, new pages, and where you left off) appear only in projects with a `wiki/pending/proposals/` folder.
 
 **Opinionated.** house-style holds documents to my own house style: British spelling, no dashes and a list of words I avoid. If your style differs, change the rules in `~/.claude/house-style/rules.json`, or leave this mod out.
 

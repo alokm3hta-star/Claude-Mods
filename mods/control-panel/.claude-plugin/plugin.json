@@ -1,0 +1,9 @@
+{
+  "name": "control-panel",
+  "version": "0.1.2",
+  "description": "Click instead of remembering: a panel of each project's own commands and playbooks, what needs you now, a wiki desk for reading proposals and findings, and where you left off. It never changes how your agents work.",
+  "author": {
+    "name": "Alok Mehta"
+  },
+  "types": "./types/index.d.ts"
+}
