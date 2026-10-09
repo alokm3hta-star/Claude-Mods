@@ -1,0 +1,9 @@
+{
+  "name": "workspace-board",
+  "version": "0.4.0",
+  "description": "One board for what is waiting on you across your projects: sessions waiting for an answer or approval, proposals to review, blockers, action items and handoffs, each with a button to jump there or start it. Opened from the Board button on the context bar.",
+  "author": {
+    "name": "Alok Mehta"
+  },
+  "types": "./types/index.d.ts"
+}

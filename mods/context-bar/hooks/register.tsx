@@ -16,6 +16,9 @@ const requestAt = atom({ plugin: 'context-bar', key: 'requestAt' } as const, nul
 // belongs to one model, so a switch leaves the next message without it.
 const requestModel = atom({ plugin: 'context-bar', key: 'requestModel' } as const, null)
 const model = atom({ plugin: 'context-bar', key: 'model' } as const, null)
+// The workspace board, when installed: its Board button sits at the end of this line.
+const board = atom({ plugin: 'workspace-board', key: 'band' } as const, { present: false, summary: '', waiting: false })
+const boardAsk = atom({ plugin: 'context-bar', key: 'boardAsk' } as const, 0)
 
 const toFill = (c: { tokens?: number; window: number; percent?: number }): Fill | null =>
   c.tokens === undefined ? null : { tokens: c.tokens, window: c.window, percent: c.percent ?? Math.round((c.tokens / c.window) * 100) }
@@ -107,7 +110,8 @@ export const register: Register = on => {
     const t = await read($, now)
     const sentWith = await read($, requestModel)
     const current = await read($, model)
-    const { Box, Text } = $.ui.resolve(e)
+    const b = await read($, board)
+    const { Box, Text, Button } = $.ui.resolve(e)
 
     const pct = f?.percent ?? 0
     const barColour = colourFor(pct)
@@ -117,7 +121,7 @@ export const register: Register = on => {
     const rate = c ? hitRate(c) : null
 
     const line = (
-      <Box flexDirection="row">
+      <Box flexDirection="row" flexWrap="wrap">
         <Text dimColor>Context </Text>
         <Text color={barColour}>{bar(pct)}</Text>
         <Text> {f ? `${pct}% (${k(f.tokens)}/${k(f.window)})` : 'no reading yet'}</Text>
@@ -125,6 +129,15 @@ export const register: Register = on => {
         <Text>{rate === null ? '–' : `${rate}%`}</Text>
         <Text dimColor>  ·  </Text>
         <Text color={state === 'warm' ? 'success' : 'inactive'}>{cacheLabel}</Text>
+        {/* The board's part is one piece, so on a narrow panel it moves to the next row whole instead of being cut off. */}
+        {b.present ? (
+          <Box key="board-part" flexDirection="row">
+            {b.summary ? <Text dimColor>  ·  </Text> : null}
+            {b.summary ? <Text color={b.waiting ? 'warning' : undefined}>{b.summary}</Text> : null}
+            <Text>  </Text>
+            <Button key="board" label="Board" onPress={() => update($, boardAsk, v => (v ?? 0) + 1)} />
+          </Box>
+        ) : null}
       </Box>
     )
     return below ? (

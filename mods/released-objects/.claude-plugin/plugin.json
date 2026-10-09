@@ -1,0 +1,40 @@
+{
+  "name": "released-objects",
+  "version": "0.2.0",
+  "description": "Flag SAP objects in ABAP code that are not released, deprecated or have no API, with SAP's successor, using SAP's own release lists. It flags, never blocks.",
+  "author": {
+    "name": "Alok Mehta"
+  },
+  "userConfig": {
+    "dataDir": {
+      "type": "string",
+      "title": "Folder holding the compact release lists",
+      "description": "Where released-objects-<list>.tsv files live, built from SAP's github.com/SAP/abap-atc-cr-cv-s4hc lists.",
+      "default": "~/Desktop/Claude Workspace/LLM Wiki/wiki/reference/sap-released-objects/data"
+    },
+    "defaultList": {
+      "type": "string",
+      "title": "Default SAP release list",
+      "description": "Used when a repository's ABAP version is not mapped: PCELatest (private cloud and on-premise) or Latest (public cloud).",
+      "default": "PCELatest"
+    },
+    "customerLists": {
+      "type": "string",
+      "title": "SAP list per customer folder",
+      "description": "One entry per customer: the folder holding that customer's code, then = and the SAP list for its release, separated by semicolons. Example: ~/code/client-a=PCE2023_3; ~/code/client-b=PCE2022_2. Takes precedence over the version map.",
+      "default": ""
+    },
+    "versionMap": {
+      "type": "string",
+      "title": "abaplint version to SAP list",
+      "description": "Pairs such as v816=PCE2023_3, separated by commas. Leave empty until each mapping is confirmed from a cited source.",
+      "default": ""
+    },
+    "customerPrefixes": {
+      "type": "string",
+      "title": "Customer name prefixes",
+      "description": "Comma-separated prefixes of your own objects, never flagged.",
+      "default": "Z,Y"
+    }
+  }
+}

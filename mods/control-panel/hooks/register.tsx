@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import { HARVEST_PROMPT, brief, byNumber, findings, knownIn, parseHarvest, proposal, setFields, toJsonl } from './desk'
 import type { Finding, Proposal } from './desk'
-import { fromInstructions, fromSkill, groups, queued } from './commands'
+import { fromInstructions, fromSkill, groups, keyOf, matches, queued, top, usage } from './commands'
 import type { Cmd } from './commands'
 import type { Counts, Mode } from '../types'
 
@@ -16,6 +16,9 @@ const cwdAtom = atom({ plugin: 'control-panel', key: 'cwd' } as const, '')
 const sentAtom = atom({ plugin: 'control-panel', key: 'sent' } as const, '')
 const cursorAtom = atom({ plugin: 'control-panel', key: 'cursor' } as const, 0)
 const versionAtom = atom({ plugin: 'control-panel', key: 'version' } as const, 0)
+const showAllAtom = atom({ plugin: 'control-panel', key: 'showAll' } as const, false)
+const filterAtom = atom({ plugin: 'control-panel', key: 'filter' } as const, '')
+const usedAtom = atom({ plugin: 'control-panel', key: 'used' } as const, {} as Record<string, number>)
 
 const PROPOSALS = 'wiki/pending/proposals'
 const FINDINGS = 'wiki/pending/session-findings.jsonl'
@@ -64,7 +67,7 @@ async function loadCommands($: EngineInterface, cwd: string): Promise<Cmd[]> {
   return out
 }
 
-type Need = { key: string; text: string; actions: { label: string; run?: string; fill?: string; open?: Mode }[] }
+type Need = { key: string; tag: string; text: string; actions: { label: string; run?: string; fill?: string; open?: Mode }[] }
 
 // What needs you now: an open handoff, unread proposals and findings, open
 // action items, files waiting to be ingested. Each with the command that deals with it.
@@ -76,26 +79,56 @@ async function needs($: EngineInterface): Promise<Need[]> {
     handoff: (await readIf($, `${root}/wiki/pending/handoff.md`)) ?? undefined,
     actions: (await readIf($, `${root}/wiki/pending/action-items.md`)) ?? undefined,
   })
-  if (b.handoff) out.push({ key: 'handoff', text: `Open handoff from ${b.handoff.slice(0, 90)}`, actions: [{ label: 'Resume', run: '@alex resume-handoff' }] })
+  if (b.handoff) out.push({ key: 'handoff', tag: 'Handoff', text: `Open handoff from ${b.handoff.slice(0, 90)}`, actions: [{ label: 'Resume', run: '@alex resume-handoff' }] })
   const c = await read($, countsAtom)
   if (c.unreviewed + c.findings > 0) {
     out.push({
       key: 'queue',
+      tag: 'To read',
       text: `${c.unreviewed} proposal${c.unreviewed === 1 ? '' : 's'} and ${c.findings} finding${c.findings === 1 ? '' : 's'} to read`,
       actions: [{ label: 'Review', open: 'review' }, ...(c.proposals > 0 ? [{ label: 'Approve all', run: '@sarah approve-all' }] : [])],
     })
   }
   for (const a of b.actions) {
     const id = /^[A-Z]+-\d+/.exec(a)?.[0]
-    if (id) out.push({ key: id, text: a.replace(/ \(since [^)]*\)$/, ''), actions: [{ label: 'Run', run: `Run action item ${id}` }] })
+    if (id) out.push({ key: id, tag: `Action item ${id}`, text: a.replace(/ \(since [^)]*\)$/, '').slice(id.length).replace(/^[\s|:]+/, ''), actions: [{ label: 'Run', run: `Run action item ${id}` }] })
   }
   const waiting = queued((await readIf($, `${root}/wiki/pending/ingest-queue.md`)) ?? '')
-  if (waiting > 0) out.push({ key: 'ingest', text: `${waiting} file${waiting === 1 ? '' : 's'} waiting to be converted`, actions: [{ label: 'Convert', fill: '@kylie convert ' }] })
+  if (waiting > 0) out.push({ key: 'ingest', tag: 'To convert', text: `${waiting} file${waiting === 1 ? '' : 's'} waiting to be converted`, actions: [{ label: 'Convert', fill: '@kylie convert ' }] })
   return out
+}
+
+// How often you typed each command in this project: from past sessions' prompts and
+// the prompt history. Only counts are kept.
+async function loadUsage($: EngineInterface, cwd: string): Promise<void> {
+  const home = (await $.env.get('HOME')) ?? ''
+  if (!home || !cwd) return
+  const prompts: string[] = []
+  const folder = `${home}/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}`
+  const files = (await $.fs.list(folder).catch(() => []))
+    .filter(f => f.kind === 'file' && f.name.endsWith('.jsonl'))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, 200)
+    .map(f => `${folder}/${f.name}`)
+  if (files.length) {
+    const r = await $.process.run(['grep', '-h', '-o', '-E', '"role":"user","content":"[@/][A-Za-z][A-Za-z-]*( [A-Za-z-]+)?', ...files], { timeoutMs: 15000 }).catch(() => null)
+    for (const l of (r?.stdout ?? '').split('\n')) if (l) prompts.push(l.slice(l.indexOf('"content":"') + 11))
+  }
+  for (const l of ((await readIf($, `${home}/.claude/history.jsonl`).catch(() => null)) ?? '').split('\n')) {
+    if (!l.includes('"display":"@') && !l.includes('"display":"/')) continue
+    try {
+      const d = JSON.parse(l) as { display?: string; project?: string }
+      if (d.project === cwd && d.display) prompts.push(d.display)
+    } catch {}
+  }
+  const used = Object.fromEntries(usage(prompts))
+  await update($, usedAtom, () => used)
 }
 
 // Sends a command as if you typed it, or puts it in the prompt for you to finish.
 async function send($: EngineInterface, cmd: { run?: string; fill?: string }): Promise<void> {
+  const k = keyOf(cmd.run ?? cmd.fill ?? '')
+  if (k) await update($, usedAtom, u => ({ ...u, [k]: ((u ?? {})[k] ?? 0) + 1 }))
   if (cmd.fill !== undefined) {
     await $.prompt.fill({ text: cmd.fill, mode: 'replace' })
     await update($, sentAtom, () => '')
@@ -135,6 +168,8 @@ async function refresh($: EngineInterface): Promise<void> {
 
 async function openDesk($: EngineInterface, mode: Mode): Promise<void> {
   await update($, modeAtom, () => mode)
+  await update($, showAllAtom, () => false)
+  await update($, filterAtom, () => '')
   await refresh($)
   // Start at the first finding, or else the first proposal you have not read.
   await update($, cursorAtom, () => Math.max(0, queue.findIndex(i => i.kind === 'finding' || !i.p.reviewed)))
@@ -234,6 +269,7 @@ export const register: Register = on => {
     await update($, cwdAtom, () => e.cwd)
     await $.command.register({ name: 'panel', description: 'Open the control panel: this project\'s commands, what needs you, the wiki desk' })
     await refresh($).catch(() => {})
+    void loadUsage($, e.cwd).catch(() => {})
     if (root) {
       await $.command.register({ name: 'wiki-review', description: 'Review wiki proposals and session findings one at a time' })
       await $.command.register({ name: 'wiki-pages', description: 'Wiki pages created in this session, to check' })
@@ -328,45 +364,87 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    const els = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = els
+    // The search box, where the surface has one.
+    const Input = 'Input' in els ? els.Input : null
     await read($, versionAtom)
     const mode = await read($, modeAtom)
     const root = await read($, rootAtom)
     const tabs = (
-      <Box flexDirection="row">
+      <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
         <Button key="t-commands" label="Commands" variant={mode === 'commands' ? 'primary' : undefined} onPress={() => update($, modeAtom, () => 'commands')} />
         {root ? <Button key="t-review" label="Wiki desk" variant={mode === 'review' ? 'primary' : undefined} onPress={() => update($, modeAtom, () => 'review')} /> : null}
         {root ? <Button key="t-pages" label="New pages" variant={mode === 'pages' ? 'primary' : undefined} onPress={() => update($, modeAtom, () => 'pages')} /> : null}
-        {root ? <Button key="t-where" label="Where we left off" variant={mode === 'where' ? 'primary' : undefined} onPress={() => update($, modeAtom, () => 'where')} /> : null}
+        {root ? <Button key="t-where" label="Last time" variant={mode === 'where' ? 'primary' : undefined} onPress={() => update($, modeAtom, () => 'where')} /> : null}
       </Box>
     )
 
     if (mode === 'commands' || !root) {
       const list = await needs($)
       const sent = await read($, sentAtom)
+      const showAll = await read($, showAllAtom)
+      const filter = await read($, filterAtom)
+      const used = await read($, usedAtom)
+      const usual = top(commands, new Map(Object.entries(used)))
+      const anyUse = usual.some(c => (used[keyOf(c.text)] ?? 0) > 0)
+      const press = (c: (typeof commands)[number]) => send($, c.mode === 'fill' ? { fill: c.text } : { run: c.text })
+      const shown = filter ? commands.filter(c => matches(c, filter)) : commands
       return (
-        <Box flexDirection="column">
+        <Box flexDirection="column" gap={1}>
           {tabs}
-          {list.length ? <Text bold>Needs you now</Text> : null}
-          {list.map(n => (
-            <Box key={`need-${n.key}`} flexDirection="row">
-              <Text>{`${n.text}  `}</Text>
-              {n.actions.map(a => (
-                <Button key={`need-${n.key}-${a.label}`} label={a.label} onPress={() => (a.open ? update($, modeAtom, () => a.open as Mode) : send($, a))} />
+          {list.length ? (
+            <Box flexDirection="column" gap={1}>
+              <Text bold>{`Needs you now · ${list.length}`}</Text>
+              {list.map(n => (
+                <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderColor={n.key === 'handoff' ? 'warning' : 'subtle'} paddingX={1}>
+                  <Text dimColor>{n.tag}</Text>
+                  <Text wrap="wrap">{n.text}</Text>
+                  <Box flexDirection="row" flexWrap="wrap" columnGap={1} marginTop={1}>
+                    {n.actions.map((a, i) => (
+                      <Button key={`need-${n.key}-${a.label}`} label={a.label} variant={i === 0 ? 'primary' : undefined} onPress={() => (a.open ? update($, modeAtom, () => a.open as Mode) : send($, a))} />
+                    ))}
+                  </Box>
+                </Box>
               ))}
             </Box>
-          ))}
-          {groups(commands).map(([g, cs]) => (
-            <Box key={`g-${g}`} flexDirection="column">
-              <Text dimColor>{g}</Text>
-              <Box flexDirection="row" flexWrap="wrap">
-                {cs.map(c => (
-                  <Button key={`c-${c.text}`} label={c.label} onPress={() => send($, c.mode === 'fill' ? { fill: c.text } : { run: c.text })} />
+          ) : (
+            <Text dimColor>Nothing needs you right now.</Text>
+          )}
+          {usual.length ? (
+            <Box flexDirection="column">
+              <Text bold>{anyUse ? 'Your usual commands' : 'Start here'}</Text>
+              <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1} marginTop={1}>
+                {usual.map(c => (
+                  <Button key={`u-${c.text}`} label={c.label} onPress={() => press(c)} />
                 ))}
               </Box>
             </Box>
-          ))}
-          {commands.length === 0 ? <Text dimColor>This project lists no commands or playbooks.</Text> : <Text dimColor>Buttons ending in … put the command in the prompt for you to finish. The rest run straight away.</Text>}
+          ) : null}
+          {commands.length ? (
+            <Box flexDirection="row">
+              <Button key="all" label={showAll ? 'Hide all commands' : `All commands (${commands.length})`} onPress={() => update($, showAllAtom, v => !v)} />
+            </Box>
+          ) : (
+            <Text dimColor>This project lists no commands or playbooks.</Text>
+          )}
+          {showAll ? (
+            <Box flexDirection="column">
+              {Input ? <Input key="filter" placeholder="Search commands, e.g. cap test" value={filter} autoFocus onInput={(v: string) => void update($, filterAtom, () => v)} onSubmit={(v: string) => void update($, filterAtom, () => v)} /> : null}
+              {groups(shown).map(([g, cs]) => (
+                <Box key={`g-${g}`} flexDirection="column">
+                  <Text dimColor>{g}</Text>
+                  <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
+                    {cs.map(c => (
+                      <Button key={`c-${c.text}`} label={c.label} onPress={() => press(c)} />
+                    ))}
+                  </Box>
+                </Box>
+              ))}
+              {shown.length === 0 ? <Text dimColor>No command matches.</Text> : null}
+              <Text dimColor>Buttons ending in … put the command in the prompt for you to finish. The rest run straight away.</Text>
+            </Box>
+          ) : null}
           {sent ? <Text color="success">{`Sent: ${sent}`}</Text> : null}
         </Box>
       )

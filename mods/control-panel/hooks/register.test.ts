@@ -2,7 +2,7 @@ import { test, expect, mock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { brief, knownIn, parseHarvest, proposal, setFields } from './desk'
-import { fromInstructions, fromSkill, groups, queued } from './commands'
+import { fromInstructions, fromSkill, groups, keyOf, matches, queued, top, usage } from './commands'
 
 const SP = (n: number, status = 'pending') =>
   `---\nid: SP-${n}\ndate: 2026-10-07\ntype: enrich\ntarget: wiki/pages/cap/x.md\npriority: medium\nstatus: ${status}\n---\n\n# SP-${n} — Add the outbox fact\n\nBody line.\n`
@@ -169,11 +169,16 @@ test('the panel lists what needs you; a run button sends, a fill button fills th
   expect(await pane.find({ type: 'Text', text: /Open handoff from 2026-10-08: Admin screen/ })).toBeDefined()
   await pane.press({ key: 'need-handoff-Resume' })
   await pane.press({ key: 'need-AI-003-Run' })
+  await pane.press({ key: 'all' })
   await pane.press({ key: 'c-@kylie convert ' })
   await pane.press({ key: 'c-@anja status' })
   expect(sent).toEqual(['@alex resume-handoff', 'Run action item AI-003', '@anja status'])
   expect(filled).toEqual(['@kylie convert '])
   await pane.unmount()
+  const wide = await $.ui.mount({ plugin: 'control-panel', surface: 'desktop', component: 'Pane', requestId: 'control-panel', props: {} as never })
+  expect(await wide.find({ type: 'Text', text: 'Action item AI-003' })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: 'Ingest notes' })).toBeDefined()
+  await wide.unmount()
 })
 
 test('a project without a wiki still gets its commands', async ($, on) => {
@@ -182,4 +187,13 @@ test('a project without a wiki still gets its commands', async ($, on) => {
   const band = await $.ui.mount({ plugin: 'control-panel', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120 } as never })
   expect(await band.find({ type: 'Text', text: /nothing needs you/ })).toBeDefined()
   await band.unmount()
+})
+
+test('your usual commands come from what you typed here; search narrows the full list', async () => {
+  const cmds = fromInstructions('```\nINGESTION:\n  @kylie convert [file]       — convert\n  @anja status                — state\n\nMAINTENANCE:\n  @sarah queue                — view\n  @sarah approve-all          — approve\n```\n')
+  const used = usage(['@sarah approve-all', '@sarah approve-all', '@kylie convert book.pdf', 'hello'])
+  expect(top(cmds, used, 2).map(c => c.command)).toEqual(['@sarah approve-all', '@kylie convert [file]'])
+  expect(top(cmds, new Map(), 6).map(c => c.command)).toEqual(['@kylie convert [file]', '@sarah queue'])
+  expect(cmds.filter(c => matches(c, 'sarah appr')).map(c => c.command)).toEqual(['@sarah approve-all'])
+  expect(keyOf('@kylie convert ')).toBe('@kylie convert')
 })

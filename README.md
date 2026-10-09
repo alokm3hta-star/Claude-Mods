@@ -14,6 +14,8 @@ installs any of them.
 | [control-panel](mods/control-panel) | Click instead of remembering: a panel of each project's own commands and playbooks, what needs you now, a wiki desk for reading proposals and findings, and where you left off. It never changes how your agents work. |
 | [git-guard](mods/git-guard) | Keep Claude out of your git history: no co-author trailer, no PR footer, and no push of a commit that carries one |
 | [house-style](mods/house-style) | Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words. It enforces the author's own style: see the note below the table. |
+| [released-objects](mods/released-objects) | Flag SAP objects in ABAP code that are not released, deprecated or have no API, with SAP's successor, using SAP's own release lists. It flags, never blocks. |
+| [workspace-board](mods/workspace-board) | One board for what is waiting on you across your projects: sessions waiting for an answer or approval, proposals to review, blockers, action items and handoffs, each with a button to jump there or start it. Opened from the Board button on the context bar. |
 <!-- mods:end -->
 
 ## Before you install

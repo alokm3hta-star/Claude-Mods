@@ -93,3 +93,32 @@ export const groups = (cmds: Cmd[]): [string, Cmd[]][] => {
 
 // Ingest queue size, from the count line the scan script writes.
 export const queued = (ingestQueue: string): number => Number(/^count:\s*(\d+)/m.exec(ingestQueue)?.[1] ?? 0)
+
+// The words a command is known by: "@sarah approve-all", "/clean-abap", "@alex".
+export const keyOf = (text: string) => text.trim().split(/\s+/).slice(0, 2).join(' ').toLowerCase()
+
+// How often each command was typed, from past prompts (one per line, the prompt's start).
+export const usage = (prompts: string[]): Map<string, number> => {
+  const out = new Map<string, number>()
+  for (const p of prompts) {
+    const t = p.trim()
+    if (!/^[@/][\w-]/.test(t)) continue
+    for (const k of [keyOf(t), t.split(/\s+/)[0]!.toLowerCase()]) out.set(k, (out.get(k) ?? 0) + 1)
+  }
+  return out
+}
+
+// Your most used commands here; with no history yet, the first of each group.
+export const top = (cmds: Cmd[], used: Map<string, number>, n = 6): Cmd[] => {
+  const score = (c: Cmd) => used.get(keyOf(c.text)) ?? 0
+  const ranked = cmds.filter(c => score(c) > 0).sort((a, b) => score(b) - score(a))
+  if (ranked.length >= n) return ranked.slice(0, n)
+  const firsts = groups(cmds).map(([, cs]) => cs[0]!).filter(c => !ranked.includes(c))
+  return [...ranked, ...firsts].slice(0, n)
+}
+
+// A command matches the search when its label, words or description hold every term.
+export const matches = (c: Cmd, query: string) => {
+  const hay = `${c.label} ${c.command} ${c.description} ${c.group}`.toLowerCase()
+  return query.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t))
+}
