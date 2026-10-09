@@ -1,0 +1,14 @@
+{
+  "name": "claude-mods",
+  "owner": {
+    "name": "Alok Mehta"
+  },
+  "description": "A collection of Claude Code mods by Alok Mehta",
+  "plugins": [
+    {
+      "name": "context-bar",
+      "source": "./mods/context-bar",
+      "description": "Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm"
+    }
+  ]
+}

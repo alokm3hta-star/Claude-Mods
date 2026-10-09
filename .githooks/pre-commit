@@ -1,0 +1,4 @@
+#!/bin/sh
+# Keep the marketplace list and the README table in step with mods/ on every commit.
+python3 scripts/sync_mods.py >/dev/null || exit 1
+git add .claude-plugin/marketplace.json README.md

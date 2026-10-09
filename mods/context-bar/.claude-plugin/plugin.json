@@ -1,0 +1,9 @@
+{
+  "name": "context-bar",
+  "version": "0.2.0",
+  "description": "Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Alok Mehta"
+  }
+}
