@@ -22,9 +22,10 @@ export const pushDirectory = (command: string): string | undefined => {
   const before = command.slice(0, at)
   const unquote = (s: string) => s.replace(/^["']|["']$/g, '')
   const c = /-C\s+("[^"]+"|'[^']+'|\S+)/.exec(command.slice(at))
-  if (c) return unquote(c[1])
+  if (c?.[1]) return unquote(c[1])
   const cds = [...before.matchAll(/\bcd\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g)]
-  return cds.length ? unquote(cds[cds.length - 1][1]) : undefined
+  const last = cds[cds.length - 1]?.[1]
+  return last ? unquote(last) : undefined
 }
 
 export const expandHome = (dir: string, home: string) =>
