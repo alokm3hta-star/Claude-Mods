@@ -1,0 +1,8 @@
+{
+  "name": "git-guard",
+  "version": "0.1.0",
+  "description": "Keep Claude out of your git history: no co-author trailer, no PR footer, and no push of a commit that carries one",
+  "author": {
+    "name": "Alok Mehta"
+  }
+}

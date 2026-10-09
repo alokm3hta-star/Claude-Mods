@@ -14,6 +14,21 @@
       "name": "context-bar",
       "source": "./mods/context-bar",
       "description": "Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm"
+    },
+    {
+      "name": "git-guard",
+      "source": "./mods/git-guard",
+      "description": "Keep Claude out of your git history: no co-author trailer, no PR footer, and no push of a commit that carries one"
+    },
+    {
+      "name": "house-style",
+      "source": "./mods/house-style",
+      "description": "Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words"
+    },
+    {
+      "name": "wiki-sources",
+      "source": "./mods/wiki-sources",
+      "description": "Say under each answer whether it came from your wiki, the web or Claude's own knowledge, and show whether the wiki server is up"
     }
   ]
 }

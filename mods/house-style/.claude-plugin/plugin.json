@@ -1,0 +1,8 @@
+{
+  "name": "house-style",
+  "version": "0.1.0",
+  "description": "Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words",
+  "author": {
+    "name": "Alok Mehta"
+  }
+}

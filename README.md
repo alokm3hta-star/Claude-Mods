@@ -11,6 +11,9 @@ installs any of them.
 | --- | --- |
 | [client-mask](mods/client-mask) | Mask client names, personal data and secrets before anything leaves this machine; keep the list private and leave no trace of what was swapped |
 | [context-bar](mods/context-bar) | Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm |
+| [git-guard](mods/git-guard) | Keep Claude out of your git history: no co-author trailer, no PR footer, and no push of a commit that carries one |
+| [house-style](mods/house-style) | Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words |
+| [wiki-sources](mods/wiki-sources) | Say under each answer whether it came from your wiki, the web or Claude's own knowledge, and show whether the wiki server is up |
 <!-- mods:end -->
 
 ## Install a mod

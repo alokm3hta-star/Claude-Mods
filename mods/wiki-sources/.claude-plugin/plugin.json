@@ -1,0 +1,9 @@
+{
+  "name": "wiki-sources",
+  "version": "0.1.0",
+  "description": "Say under each answer whether it came from your wiki, the web or Claude's own knowledge, and show whether the wiki server is up",
+  "author": {
+    "name": "Alok Mehta"
+  },
+  "types": "./types/index.d.ts"
+}
