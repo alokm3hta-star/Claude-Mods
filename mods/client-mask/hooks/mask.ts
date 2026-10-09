@@ -11,7 +11,8 @@ export type Entry = {
   real?: string
   // Or a regular expression (an IBAN, a tax ID). Masked, never turned back.
   pattern?: string
-  // What the model sees instead, e.g. CLIENT_3: capitals, digits, underscores.
+  // What the model sees instead, e.g. CLIENT_3. Any text you like; leave it
+  // blank ("") to remove the name altogether, never turned back.
   placeholder: string
   wholeWord?: boolean
   // false keeps the placeholder even in files Claude writes, so the name never
@@ -38,8 +39,6 @@ export type Config = {
   terms: Entry[]
 }
 
-const SHAPE = /^[A-Z][A-Z0-9_]*$/
-
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const literal = (s: string, wholeWord: boolean) =>
@@ -58,9 +57,7 @@ export const validate = (config: unknown): string[] => {
   c.terms.forEach((t, i) => {
     const row = `row ${i + 1}`
     if (!t || typeof t !== 'object') return void problems.push(`${row} is not an entry`)
-    if (typeof t.placeholder !== 'string' || !SHAPE.test(t.placeholder)) {
-      problems.push(`${row}: the placeholder must be capitals, digits and underscores, like CLIENT_3`)
-    }
+    if (typeof t.placeholder !== 'string') problems.push(`${row}: give a placeholder, or "" to remove the name`)
     const hasReal = typeof t.real === 'string' && t.real.trim() !== ''
     const hasPattern = typeof t.pattern === 'string' && t.pattern !== ''
     if (hasReal === hasPattern) problems.push(`${row}: give either "real" or "pattern"`)
@@ -95,12 +92,18 @@ export const validate = (config: unknown): string[] => {
 
 type Rule = { re: RegExp; placeholder: string }
 
+// How a name removed altogether (a blank placeholder) is shown on your screen.
+export const REMOVED = '(removed)'
+
 export class Masker {
   private readonly rules: Rule[] = []
   private readonly back = new Map<string, string>()
   private readonly shown = new Map<string, string>()
   private readonly known: RegExp | null
   private readonly detector: Detector
+  private readonly removedNames: string[] = []
+  // How many names the last mask() call removed altogether.
+  removed = 0
 
   constructor(config: Config) {
     this.detector = new Detector(config.detect, [...DEFAULT_KEEP, ...(config.keep ?? [])])
@@ -113,6 +116,11 @@ export class Masker {
         continue
       }
       if (!t.real) continue
+      if (t.placeholder === '') {
+        literals.push({ re: literal(t.real, t.wholeWord ?? wholeDefault), placeholder: '', length: t.real.length })
+        this.removedNames.push(t.real)
+        continue
+      }
       literals.push({ re: literal(t.real, t.wholeWord ?? wholeDefault), placeholder: t.placeholder, length: t.real.length })
       if (!this.shown.has(t.placeholder)) this.shown.set(t.placeholder, t.real)
       if (t.toFiles !== false && !this.back.has(t.placeholder)) this.back.set(t.placeholder, t.real)
@@ -121,7 +129,7 @@ export class Masker {
     literals.sort((a, b) => b.length - a.length)
     this.rules.push(...literals.map(({ re, placeholder }) => ({ re, placeholder })), ...patterns)
 
-    const all = [...new Set(config.terms.map(t => t.placeholder))].sort((a, b) => b.length - a.length)
+    const all = [...new Set(config.terms.map(t => t.placeholder).filter(p => p !== ''))].sort((a, b) => b.length - a.length)
     this.known = all.length ? new RegExp(`(?<![A-Za-z0-9_])(?:${all.map(escape).join('|')})(?![A-Za-z0-9_])`, 'g') : null
   }
 
@@ -149,7 +157,15 @@ export class Masker {
   mask(text: string): string {
     if (!text) return text
     let out = text
-    for (const rule of this.rules) out = this.outside(out, part => part.replace(rule.re, rule.placeholder))
+    this.removed = 0
+    for (const rule of this.rules) {
+      out = this.outside(out, part =>
+        part.replace(rule.re, () => {
+          if (rule.placeholder === '') this.removed++
+          return rule.placeholder
+        }),
+      )
+    }
     return this.outside(out, part => this.detector.mask(part))
   }
 
@@ -195,7 +211,7 @@ export class Masker {
     for (const rule of this.rules) {
       this.outside(text, part => {
         rule.re.lastIndex = 0
-        if (rule.re.test(part)) found.add(rule.placeholder)
+        if (rule.re.test(part)) found.add(rule.placeholder || REMOVED)
         rule.re.lastIndex = 0
         return part
       })
@@ -209,7 +225,7 @@ export class Masker {
 
   // Placeholder and the name it turns back into, for the on-screen legend.
   legend(): [string, string][] {
-    return [...this.shown.entries()]
+    return [...this.shown.entries(), ...this.removedNames.map((real): [string, string] => [REMOVED, real])]
   }
 }
 

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { BINARY_FILE, Masker, mapStrings, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, Masker, REMOVED, mapStrings, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
 import type { MaskStatus } from '../types'
 
@@ -19,6 +19,7 @@ const TEMPLATE = {
     'One row per spelling: {"real": "Acme Bank", "placeholder": "CLIENT_1"}. ' +
     'Rows may share a placeholder; the first row is the spelling it turns back into. ' +
     'For numbers such as an IBAN use {"pattern": "<regular expression>", "placeholder": "IBAN"}; those are never turned back. ' +
+    'Any text works as a placeholder; leave it blank ("") to remove the name altogether. ' +
     'Add "toFiles": false to a row to keep its placeholder even in files Claude writes (for people\'s names and IDs). ' +
     'Emails, phone numbers, NI numbers, IBANs, card numbers, VAT numbers and secrets are masked without being listed; ' +
     'switch one off with "detect": {"phone": false}, and list values to leave alone in "keep". ' +
@@ -53,6 +54,10 @@ let counted = 0
 const swaps = new Map<string, number>()
 const countingMask = (s: string) => {
   const out = mask(s)
+  if (masker && isOn() && masker.removed > 0) {
+    counted += masker.removed
+    swaps.set(REMOVED, (swaps.get(REMOVED) ?? 0) + masker.removed)
+  }
   if (masker && out !== s) {
     const before = masker.markCounts(s)
     for (const [mark, n] of masker.markCounts(out)) {

@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { Masker, namesList, validate } from './mask'
+import { Masker, REMOVED, namesList, validate } from './mask'
 import type { Config } from './mask'
 
 const LIST: Config = {
@@ -53,6 +53,7 @@ test('a list with mistakes is refused, by row number and without quoting a name'
       { real: 'Northwind Revenue', placeholder: 'CLIENT_4' },
       { placeholder: 'X' },
       { real: 'NWR', pattern: 'x', placeholder: 'Y' },
+      { real: 'Acme' },
     ],
   })
   expect(problems.length).toBe(4)
@@ -85,4 +86,24 @@ test('what a message gained is counted per placeholder and label', async () => {
   const counts = m.markCounts(after)
   expect(counts.get('CLIENT_3')).toBe(2)
   expect(counts.get('‹EMAIL›')).toBe(1)
+})
+
+test('any text is a placeholder, and a blank one removes the name for good', async () => {
+  const list: Config = {
+    terms: [
+      { real: 'Northwind Revenue', placeholder: 'the client (bank)' },
+      { real: 'Priya Okafor', placeholder: '' },
+    ],
+  }
+  expect(validate(list)).toEqual([])
+  const m = new Masker(list)
+  expect(m.mask('Northwind Revenue told Priya Okafor no.')).toBe('the client (bank) told  no.')
+  expect(m.removed).toBe(1)
+  expect(m.restore('Dear the client (bank)')).toBe('Dear Northwind Revenue')
+  expect(m.restore('nothing comes back for a removed name')).toBe('nothing comes back for a removed name')
+  expect(m.leaks('Priya Okafor is here')).toEqual([REMOVED])
+  expect(m.legend()).toEqual([
+    ['the client (bank)', 'Northwind Revenue'],
+    [REMOVED, 'Priya Okafor'],
+  ])
 })
