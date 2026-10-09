@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { bar, colourFor, hitRate, minutesLeft } from './register'
+import { bar, cacheFrom, colourFor, hitRate, minutesLeft } from './register'
 
 test('bar fills in proportion to the percentage', async () => {
   expect(bar(0, 10)).toBe('░░░░░░░░░░')
@@ -33,4 +33,14 @@ test('bar is green to 45%, amber above 45%, red above 60%', async () => {
   expect(colourFor(46)).toBe('warning')
   expect(colourFor(60)).toBe('warning')
   expect(colourFor(61)).toBe('error')
+})
+
+test('countdown starts when the last request went out, not when the turn ended', async () => {
+  const usage = { cache_read_input_tokens: 90, cache_creation_input_tokens: 5, input_tokens: 5 }
+  const sent = 0
+  const ended = 10 * 60000
+  const c = cacheFrom(usage, sent, ended)
+  expect(c.at).toBe(sent)
+  expect(minutesLeft(c, ended)).toBe(50)
+  expect(cacheFrom(usage, null, ended).at).toBe(ended)
 })

@@ -11,6 +11,7 @@ const BAR_CELLS = 20
 const fill = atom({ plugin: 'context-bar', key: 'fill' } as const, null)
 const cache = atom({ plugin: 'context-bar', key: 'cache' } as const, null)
 const now = atom({ plugin: 'context-bar', key: 'now' } as const, 0)
+const requestAt = atom({ plugin: 'context-bar', key: 'requestAt' } as const, null)
 
 const toFill = (c: { tokens?: number; window: number; percent?: number }): Fill | null =>
   c.tokens === undefined ? null : { tokens: c.tokens, window: c.window, percent: c.percent ?? Math.round((c.tokens / c.window) * 100) }
@@ -29,6 +30,15 @@ export const hitRate = (c: Cache) => {
   const total = c.read + c.write + c.input
   return total === 0 ? 0 : Math.round((c.read / total) * 100)
 }
+
+// The cache lifetime runs from the start of the request that read or wrote it,
+// so the countdown starts when the turn's last request went out, not when the
+// turn ended. Without a request time, the turn's end is the fallback.
+export const cacheFrom = (
+  u: { cache_read_input_tokens: number; cache_creation_input_tokens: number; input_tokens: number },
+  sentAt: number | null,
+  endedAt: number,
+): Cache => ({ read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, input: u.input_tokens, at: sentAt ?? endedAt })
 
 export const minutesLeft = (c: Cache, at: number) => Math.max(0, Math.ceil(CACHE_TTL_MIN - (at - c.at) / 60000))
 
@@ -51,11 +61,21 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Each step is one request to the model; stamp it as it goes out.
+  on('turn.step', async function* ($, e, next) {
+    if (!e.agentId) {
+      const t = await $.clock.now()
+      await update($, requestAt, () => t)
+    }
+    return yield* next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId && e.usage) {
       const t = await $.clock.now()
       const u = e.usage
-      await update($, cache, () => ({ read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, input: u.input_tokens, at: t }))
+      const sentAt = await read($, requestAt)
+      await update($, cache, () => cacheFrom(u, sentAt, t))
       await update($, now, () => t)
     }
     return next(e)
