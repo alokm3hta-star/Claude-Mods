@@ -18,6 +18,10 @@ export type Entry = {
   // false keeps the placeholder even in files Claude writes, so the name never
   // lands in code, comments, file names or test data. Default true.
   toFiles?: boolean
+  // Mask this row only when one of these also appears in the same message or
+  // file: a name from the list (any spelling of it counts), its placeholder, or
+  // other text. On its own the name is left as it is.
+  onlyWith?: string[]
 }
 
 export type Config = {
@@ -68,6 +72,9 @@ export const validate = (config: unknown): string[] => {
         problems.push(`${row}: the pattern is not a valid regular expression`)
       }
     }
+    if (t.onlyWith !== undefined && (!strings(t.onlyWith) || t.onlyWith.length === 0 || t.onlyWith.some(w => w.trim() === ''))) {
+      problems.push(`${row}: "onlyWith" must be a list of names`)
+    }
     if (hasReal) {
       const key = (t.real as string).toLowerCase()
       const before = realTo.get(key)
@@ -90,7 +97,13 @@ export const validate = (config: unknown): string[] => {
   return problems
 }
 
-type Rule = { re: RegExp; placeholder: string }
+// `when`: the rule applies only to a text in which one of these is found.
+type Rule = { re: RegExp; placeholder: string; when?: RegExp[] }
+
+// How "onlyWith" rows behave for one session: masked only together with their
+// companion (the default), always, or never.
+export type GroupMode = 'together' | 'always' | 'never'
+export const GROUP_MODES: readonly GroupMode[] = ['together', 'always', 'never']
 
 // How a name removed altogether (a blank placeholder) is shown on your screen.
 export const REMOVED = '(removed)'
@@ -104,33 +117,58 @@ export class Masker {
   private readonly removedNames: string[] = []
   // How many names the last mask() call removed altogether.
   removed = 0
+  groupMode: GroupMode = 'together'
 
   constructor(config: Config) {
     this.detector = new Detector(config.detect, [...DEFAULT_KEEP, ...(config.keep ?? [])])
     const wholeDefault = config.wholeWord ?? true
     const literals: (Rule & { length: number })[] = []
     const patterns: Rule[] = []
+    const companions = (t: Entry) => (t.onlyWith ? t.onlyWith.map(w => this.companion(config, w)) : undefined)
     for (const t of config.terms) {
       if (t.pattern) {
-        patterns.push({ re: new RegExp(t.pattern, 'gu'), placeholder: t.placeholder })
+        patterns.push({ re: new RegExp(t.pattern, 'gu'), placeholder: t.placeholder, when: companions(t) })
         continue
       }
       if (!t.real) continue
+      const rule = { re: literal(t.real, t.wholeWord ?? wholeDefault), placeholder: t.placeholder, length: t.real.length, when: companions(t) }
+      literals.push(rule)
       if (t.placeholder === '') {
-        literals.push({ re: literal(t.real, t.wholeWord ?? wholeDefault), placeholder: '', length: t.real.length })
         this.removedNames.push(t.real)
         continue
       }
-      literals.push({ re: literal(t.real, t.wholeWord ?? wholeDefault), placeholder: t.placeholder, length: t.real.length })
       if (!this.shown.has(t.placeholder)) this.shown.set(t.placeholder, t.real)
       if (t.toFiles !== false && !this.back.has(t.placeholder)) this.back.set(t.placeholder, t.real)
     }
     // Longest first, so "Acme Bank" wins over "Acme".
     literals.sort((a, b) => b.length - a.length)
-    this.rules.push(...literals.map(({ re, placeholder }) => ({ re, placeholder })), ...patterns)
+    this.rules.push(...literals.map(({ re, placeholder, when }) => ({ re, placeholder, when })), ...patterns)
 
     const all = [...new Set(config.terms.map(t => t.placeholder).filter(p => p !== ''))].sort((a, b) => b.length - a.length)
     this.known = all.length ? new RegExp(`(?<![A-Za-z0-9_])(?:${all.map(escape).join('|')})(?![A-Za-z0-9_])`, 'g') : null
+  }
+
+  // What counts as `w` being present: every spelling that shares its
+  // placeholder, and the placeholder itself, or else the text of `w` as given.
+  private companion(config: Config, w: string): RegExp {
+    const wholeDefault = config.wholeWord ?? true
+    const group =
+      config.terms.find(t => t.placeholder !== '' && t.placeholder === w)?.placeholder ??
+      config.terms.find(t => t.real && t.real.toLowerCase() === w.toLowerCase())?.placeholder
+    const forms =
+      group === undefined
+        ? [literal(w, wholeDefault).source]
+        : [
+            ...config.terms.filter(t => t.real && t.placeholder === group).map(t => literal(t.real as string, t.wholeWord ?? wholeDefault).source),
+            ...(group !== '' ? [`(?<![A-Za-z0-9_])${escape(group)}(?![A-Za-z0-9_])`] : []),
+          ]
+    return new RegExp(forms.join('|'), 'iu')
+  }
+
+  private applies(rule: Rule, text: string) {
+    if (!rule.when || this.groupMode === 'always') return true
+    if (this.groupMode === 'never') return false
+    return rule.when.some(re => re.test(text))
   }
 
   get termCount() {
@@ -158,7 +196,8 @@ export class Masker {
     if (!text) return text
     let out = text
     this.removed = 0
-    for (const rule of this.rules) {
+    const rules = this.rules.filter(rule => this.applies(rule, text))
+    for (const rule of rules) {
       out = this.outside(out, part =>
         part.replace(rule.re, () => {
           if (rule.placeholder === '') this.removed++
@@ -206,9 +245,17 @@ export class Masker {
   }
 
   // Placeholders of any name still present in clear text.
-  leaks(text: string): string[] {
+  // Given the conversation piece by piece, an "onlyWith" row is judged within
+  // each piece, the same way it was masked.
+  leaks(texts: string | string[]): string[] {
     const found = new Set<string>()
+    for (const text of Array.isArray(texts) ? texts : [texts]) this.leaksIn(text, found)
+    return [...found]
+  }
+
+  private leaksIn(text: string, found: Set<string>) {
     for (const rule of this.rules) {
+      if (!this.applies(rule, text)) continue
       this.outside(text, part => {
         rule.re.lastIndex = 0
         if (rule.re.test(part)) found.add(rule.placeholder || REMOVED)
@@ -310,7 +357,9 @@ export const maskContent = (content: unknown, mask: (s: string) => string): unkn
 
 // The text of a conversation the guard scans: everything but signed thinking
 // and binary media.
-export const scannable = (messages: { content: unknown }[]): string => {
+// One piece per message text, tool input value, tool output or document, so
+// each is judged on its own, as it was masked.
+export const scannable = (messages: { content: unknown }[]): string[] => {
   const parts: string[] = []
   const walk = (b: unknown) => {
     if (typeof b === 'string') return void parts.push(b)
@@ -323,14 +372,14 @@ export const scannable = (messages: { content: unknown }[]): string => {
       return
     }
     if (typeof block.text === 'string') parts.push(block.text)
-    if (block.type === 'tool_use') parts.push(JSON.stringify(block.input ?? ''))
+    if (block.type === 'tool_use') mapStrings(block.input, v => (parts.push(v), v))
     if (block.type === 'tool_result') {
       if (typeof block.content === 'string') parts.push(block.content)
       else if (Array.isArray(block.content)) block.content.forEach(walk)
     }
   }
   for (const m of messages) Array.isArray(m.content) ? m.content.forEach(walk) : walk(m.content)
-  return parts.join('\n')
+  return parts
 }
 
 export const toolMatches = (tool: string, patterns: string[]) =>

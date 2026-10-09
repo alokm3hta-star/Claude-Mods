@@ -107,3 +107,39 @@ test('any text is a placeholder, and a blank one removes the name for good', asy
     [REMOVED, 'Priya Okafor'],
   ])
 })
+
+test('an "onlyWith" row is masked only when its companion is in the same text', async () => {
+  const list: Config = {
+    terms: [
+      { real: 'Northwind Revenue', placeholder: 'CLIENT_3' },
+      { real: 'NWR', placeholder: 'CLIENT_3' },
+      { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] },
+    ],
+  }
+  expect(validate(list)).toEqual([])
+  const m = new Masker(list)
+  expect(m.mask('NWR runs TRM')).toBe('CLIENT_3 runs SYSTEM_1')
+  expect(m.mask('Northwind Revenue runs TRM')).toBe('CLIENT_3 runs SYSTEM_1')
+  expect(m.mask('CLIENT_3 runs TRM')).toBe('CLIENT_3 runs SYSTEM_1')
+  expect(m.mask('TRM on its own')).toBe('TRM on its own')
+  expect(m.leaks(['CLIENT_3 joined', 'TRM on its own'])).toEqual([])
+  expect(m.leaks(['CLIENT_3 runs TRM'])).toEqual(['SYSTEM_1'])
+  expect(validate({ terms: [{ real: 'TRM', placeholder: 'S', onlyWith: [] }] })).toEqual(['row 1: "onlyWith" must be a list of names'])
+})
+
+test('for one session, "onlyWith" rows can be masked always or never', async () => {
+  const m = new Masker({
+    terms: [
+      { real: 'NWR', placeholder: 'CLIENT_3' },
+      { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] },
+    ],
+  })
+  m.groupMode = 'always'
+  expect(m.mask('TRM on its own')).toBe('SYSTEM_1 on its own')
+  expect(m.leaks(['TRM on its own'])).toEqual(['SYSTEM_1'])
+  m.groupMode = 'never'
+  expect(m.mask('NWR runs TRM')).toBe('CLIENT_3 runs TRM')
+  expect(m.leaks(['CLIENT_3 runs TRM'])).toEqual([])
+  m.groupMode = 'together'
+  expect(m.mask('NWR runs TRM')).toBe('CLIENT_3 runs SYSTEM_1')
+})

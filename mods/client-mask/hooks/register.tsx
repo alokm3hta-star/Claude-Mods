@@ -1,15 +1,16 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { BINARY_FILE, Masker, REMOVED, mapStrings, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, GROUP_MODES, Masker, REMOVED, mapStrings, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
-import type { MaskStatus } from '../types'
+import type { GroupMode, MaskStatus } from '../types'
 
 // Your list lives outside every repository, in your home folder, and never in
 // chat. Claude is refused any tool call that names its folder.
 const DIR = '.claude/client-mask'
 const VIEW = 'client-mask-view'
 const EDIT = 'client-mask-edit'
+const GROUPS = 'client-mask-groups'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -20,6 +21,7 @@ const TEMPLATE = {
     'Rows may share a placeholder; the first row is the spelling it turns back into. ' +
     'For numbers such as an IBAN use {"pattern": "<regular expression>", "placeholder": "IBAN"}; those are never turned back. ' +
     'Any text works as a placeholder; leave it blank ("") to remove the name altogether. ' +
+    'Add "onlyWith": ["NBR"] to a row to mask it only when NBR (or any of its spellings) is in the same message or file. ' +
     'Add "toFiles": false to a row to keep its placeholder even in files Claude writes (for people\'s names and IDs). ' +
     'Emails, phone numbers, NI numbers, IBANs, card numbers, VAT numbers and secrets are masked without being listed; ' +
     'switch one off with "detect": {"phone": false}, and list values to leave alone in "keep". ' +
@@ -34,6 +36,13 @@ const TEMPLATE = {
 // items the last message carried masked. Counts only, never what was masked.
 const statusAtom = atom({ plugin: 'client-mask', key: 'status' } as const, null)
 const maskedAtom = atom({ plugin: 'client-mask', key: 'masked' } as const, 0)
+// This session's choice for "onlyWith" rows; a new session starts at 'together'.
+const groupsAtom = atom({ plugin: 'client-mask', key: 'groups' } as const, 'together' as GroupMode)
+const GROUP_HELP: Record<GroupMode, string> = {
+  together: 'masked only when their companion is in the same message or file',
+  always: 'always masked, even on their own',
+  never: 'never masked, even next to their companion',
+}
 
 let masker: Masker | null = null
 let markedSession = ''
@@ -106,6 +115,7 @@ const markSession = async ($: EngineInterface) => {
 // Never throws: a list it cannot read stops sending rather than sending unmasked.
 const ensure = async ($: EngineInterface) => {
   await load($)
+  if (masker) masker.groupMode = await read($, groupsAtom)
   try {
     await markSession($)
   } catch {
@@ -166,6 +176,7 @@ export const register: Register = on => {
     $.clock.every(5000, () => void ensure($))
     await $.command.register({ name: VIEW, description: 'Show which placeholder stands for which client term (on screen only)' })
     await $.command.register({ name: EDIT, description: 'Open your masking list in your text editor (Claude never sees it)' })
+    await $.command.register({ name: GROUPS, description: 'For this session, mask "onlyWith" names: together (normal), always, or never' })
     return next(e)
   })
 
@@ -318,6 +329,22 @@ export const register: Register = on => {
     }
     const { exitCode } = await $.process.run(['open', '-t', listPath])
     return { text: exitCode === 0 ? 'Your masking list is open in your text editor. Save it and masking picks it up within 5 seconds.' : 'Could not open your text editor.' }
+  })
+
+  // Sets, for this session only, how "onlyWith" rows behave.
+  on('command.run', { command: GROUPS }, async ($, e) => {
+    const choice = e.args.trim().toLowerCase()
+    if (choice === '') {
+      const now = await read($, groupsAtom)
+      return { text: `Grouped names are ${GROUP_HELP[now]} (${now}). Change it with /${GROUPS} together, always or never.` }
+    }
+    if (!(GROUP_MODES as readonly string[]).includes(choice)) {
+      return { text: `Use /${GROUPS} together, always or never.` }
+    }
+    const mode = choice as GroupMode
+    await update($, groupsAtom, () => mode)
+    if (masker) masker.groupMode = mode
+    return { text: `For this session, grouped names are ${GROUP_HELP[mode]}.` }
   })
 
   // After each answer, a pop-up naming what was masked, by placeholder only.
