@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { Masker, REMOVED, namesList, validate } from './mask'
+import { KEEP_AS_IS, Masker, REMOVED, namesList, validate } from './mask'
 import type { Config } from './mask'
 
 const LIST: Config = {
@@ -125,4 +125,19 @@ test('an "onlyWith" row is masked only when its companion is in the same text', 
   expect(m.leaks(['CLIENT_3 joined', 'TRM on its own'])).toEqual([])
   expect(m.leaks(['CLIENT_3 runs TRM'])).toEqual(['SYSTEM_1'])
   expect(validate({ terms: [{ real: 'TRM', placeholder: 'S', onlyWith: [] }] })).toEqual(['row 1: "onlyWith" must be a list of names'])
+})
+
+test('SAP is masked to but never turned back into a name, on screen or in tools', async () => {
+  const m = new Masker({
+    terms: [
+      { real: 'Northwind', placeholder: 'SAP' },
+      { real: 'Contoso', placeholder: 'SAP' },
+      { real: 'NWR', placeholder: 'CLIENT_3' },
+    ],
+  })
+  expect(KEEP_AS_IS.has('SAP')).toBe(true)
+  expect(m.mask('Northwind and Contoso run NWR')).toBe('SAP and SAP run CLIENT_3')
+  expect(m.restore('SAP for CLIENT_3')).toBe('SAP for NWR')
+  expect(m.display('SAP for CLIENT_3', false)).toBe('SAP for NWR🔒')
+  expect(m.legend().some(([ph]) => ph === 'SAP')).toBe(false)
 })

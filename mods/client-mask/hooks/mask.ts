@@ -103,6 +103,10 @@ type Rule = { re: RegExp; placeholder: string; when?: RegExp[] }
 // How a name removed altogether (a blank placeholder) is shown on your screen.
 export const REMOVED = '(removed)'
 
+// Placeholders that are a real word in their own right. Several names may be
+// masked to one, but it is never turned back into any of them: SAP stays SAP.
+export const KEEP_AS_IS: ReadonlySet<string> = new Set(['SAP'])
+
 export class Masker {
   private readonly rules: Rule[] = []
   private readonly back = new Map<string, string>()
@@ -131,6 +135,7 @@ export class Masker {
         this.removedNames.push(t.real)
         continue
       }
+      if (KEEP_AS_IS.has(t.placeholder)) continue
       if (!this.shown.has(t.placeholder)) this.shown.set(t.placeholder, t.real)
       if (t.toFiles !== false && !this.back.has(t.placeholder)) this.back.set(t.placeholder, t.real)
     }
