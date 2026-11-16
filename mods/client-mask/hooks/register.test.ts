@@ -52,6 +52,19 @@ test('a local tool gets the real values back; a web tool keeps placeholders; not
   expect(Object.keys(files)).toEqual([LIST_PATH])
 })
 
+test('a local tool call with no placeholder is passed on as the same call', async ($, on) => {
+  disk(on)
+  let seen: Record<string, unknown> = {}
+  const call = { tool: 'Bash', command: 'ls /x' }
+  on('tool.call', ($, e) => {
+    const { tool_use_id, ...rest } = e as Record<string, unknown>
+    seen = rest
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call(call as never)
+  expect(JSON.stringify(seen)).toBe(JSON.stringify(call))
+})
+
 test('a tool call that opens the list folder is refused', async ($, on) => {
   disk(on)
   let ran = false

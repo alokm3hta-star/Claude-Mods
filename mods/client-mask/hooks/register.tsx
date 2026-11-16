@@ -428,6 +428,9 @@ export const register: Register = on => {
     if (home !== '' && path.startsWith(`${home}/.claude/`)) return next(e)
     const m = masker
     const restored = mapStrings(args, s => m.restore(s)) as typeof args
+    // Pass the call on untouched when nothing was turned back: a call a hook
+    // rewrote is not the one auto mode reviewed, so it would be refused.
+    if (JSON.stringify(restored) === JSON.stringify(args)) return next(e)
     return next({ ...e, ...restored, tool, tool_use_id } as typeof e)
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'client-mask: its guard failed, so the tool call was stopped.' }))
 
