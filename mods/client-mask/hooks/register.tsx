@@ -239,7 +239,7 @@ const savedConversations = async ($: EngineInterface, pick: (session: string, mt
 // search) is caught. Each call's argument pieces are held until the call ends,
 // so a name split across pieces is still found; unchanged calls pass as sent.
 type StepChunk = TurnStepChunk
-const maskToolArgs = async function* (stream: HookStream<StepChunk, TurnStepResult>, m: Masker): AsyncGenerator<StepChunk, TurnStepResult> {
+export const maskToolArgs = async function* (stream: HookStream<StepChunk, TurnStepResult>, m: Masker): AsyncGenerator<StepChunk, TurnStepResult> {
   let held: { index: number; chunks: StepChunk[]; json: string } | null = null
   const flush = function* (): Generator<StepChunk> {
     if (!held) return
@@ -257,8 +257,10 @@ const maskToolArgs = async function* (stream: HookStream<StepChunk, TurnStepResu
       held.json += c.json
       continue
     }
-    // An item the engine does not model can arrive mid-call; it does not end it.
-    if (c.kind !== 'engine') yield* flush()
+    // Any other item ends the held pieces, the engine's own items included: a
+    // block's end arrives as one, and the engine closes the call on it. Holding
+    // the pieces past it sent every tool call with no arguments.
+    yield* flush()
     yield c
   }
   yield* flush()

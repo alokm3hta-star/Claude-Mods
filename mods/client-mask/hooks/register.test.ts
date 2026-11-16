@@ -1,6 +1,8 @@
 import { test, expect, mock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
+import { maskToolArgs } from './register'
+import { Masker } from './mask'
 
 const HOME = '/home/t'
 const LIST_PATH = `${HOME}/.claude/client-mask/terms.json`
@@ -274,6 +276,41 @@ test("a tool call with nothing to mask streams through unchanged", async ($, on)
   const { chunks } = await runStep($)
   expect(chunks.filter(c => c.kind === 'input').map(c => c.json)).toEqual(['{"prompt":', '"plain"}'])
 })
+
+// Regression: held pieces released only after the engine's block-end marker
+// reached the engine as a call with no arguments ("required parameter missing").
+// The test engine refuses made-up engine chunks, so the stream is fed directly.
+const fakeStream = (chunks: unknown[]) => {
+  const gen = (async function* () {
+    for (const c of chunks) yield c
+  })()
+  return Object.assign(gen, {
+    result: Promise.resolve({ turnId: 'x', index: 0, answer: '', toolUses: [], stopReason: 'tool_use', usage: null }),
+  }) as never
+}
+
+for (const [label, pieces] of [
+  ['nothing to mask', ['{"command":', '"ls"}']],
+  ['a name to mask', ['{"prompt":"brief for Northwind ', 'Revenue"}']],
+] as const) {
+  test(`a tool call's arguments pass before the engine's end-of-block marker (${label})`, async () => {
+    const m = new Masker(LIST as never)
+    const out: { kind: string; json?: string }[] = []
+    const stream = fakeStream([
+      { kind: 'tool', index: 0, id: 't1', name: 'Bash', ref: 1 },
+      ...pieces.map((json, i) => ({ kind: 'input', index: 0, json, ref: 2 + i })),
+      { kind: 'engine', ref: 9 },
+      { kind: 'stop', stopReason: 'tool_use', usage: null, ref: 10 },
+    ])
+    const gen = maskToolArgs(stream, m)
+    for (let r = await gen.next(); !r.done; r = await gen.next()) out.push(r.value as never)
+    const kinds = out.map(c => c.kind)
+    expect(kinds.lastIndexOf('input')).toBeLessThan(kinds.indexOf('engine'))
+    const json = out.filter(c => c.kind === 'input').map(c => c.json).join('')
+    expect(json).not.toContain('Northwind')
+    expect(JSON.parse(json)).toBeTruthy()
+  })
+}
 
 test("a name in an earlier tool call of the model's does not stop the conversation", async ($, on) => {
   disk(on)
