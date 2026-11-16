@@ -302,6 +302,27 @@ const fakeStream = (chunks: unknown[]) => {
   }) as never
 }
 
+test('the final tool calls keep their own objects when nothing is masked; a name is still masked', async () => {
+  const m = new Masker(LIST as never)
+  const plain = { id: 't1', name: 'Agent', input: { prompt: 'review the draft comments' } }
+  const named = { id: 't2', name: 'Agent', input: { prompt: 'brief for Northwind Revenue' } }
+  const run = async (toolUses: unknown[]) => {
+    const result = { turnId: 'x', index: 0, answer: '', toolUses, stopReason: 'tool_use', usage: null }
+    const gen = (async function* () {})()
+    const it = maskToolArgs(Object.assign(gen, { result: Promise.resolve(result) }) as never, m)
+    let r = await it.next()
+    while (!r.done) r = await it.next()
+    return { result, out: r.value as unknown as typeof result }
+  }
+  const a = await run([plain])
+  expect(a.out).toBe(a.result)
+  expect(a.out.toolUses[0]).toBe(plain)
+  const b = await run([plain, named])
+  expect(b.out.toolUses[0]).toBe(plain)
+  expect(JSON.stringify(b.out.toolUses[1])).toContain('CLIENT_3')
+  expect(JSON.stringify(b.out.toolUses[1])).not.toContain('Northwind')
+})
+
 for (const [label, pieces] of [
   ['nothing to mask', ['{"command":', '"ls"}']],
   ['a name to mask', ['{"prompt":"brief for Northwind ', 'Revenue"}']],

@@ -265,7 +265,13 @@ export const maskToolArgs = async function* (stream: HookStream<StepChunk, TurnS
   }
   yield* flush()
   const r = await stream.result
-  return { ...r, toolUses: r.toolUses.map(t => ({ ...t, input: mapStrings(t.input, s => m.mask(s)) })) }
+  // A call with nothing to mask keeps its own object: a call a hook rewrote is
+  // not the one auto mode reviewed, so it would be refused.
+  const toolUses = r.toolUses.map(t => {
+    const input = mapStrings(t.input, s => m.mask(s))
+    return JSON.stringify(input) === JSON.stringify(t.input) ? t : { ...t, input }
+  })
+  return toolUses.every((t, i) => t === r.toolUses[i]) ? r : { ...r, toolUses }
 }
 
 const maskedSessions = async ($: EngineInterface): Promise<Record<string, number>> => {
