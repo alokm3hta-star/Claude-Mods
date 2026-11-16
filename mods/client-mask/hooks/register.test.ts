@@ -1,9 +1,11 @@
 import { test, expect, mock } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 
 const HOME = '/home/t'
 const LIST_PATH = `${HOME}/.claude/client-mask/terms.json`
 const LIST = {
+  startOn: true,
   blockedFolders: ['~/client-exports'],
   terms: [
     { real: 'Northwind Revenue', placeholder: 'CLIENT_3' },
@@ -22,6 +24,12 @@ const disk = (on: On, text = JSON.stringify(LIST)) => {
   on('fs.write', ($, e) => {
     files[e.path] = e.text
     return { value: undefined }
+  })
+  const store: Record<string, unknown> = {}
+  on('store.get', ($, e) => ({ value: store[e.key] }) as never)
+  on('store.set', ($, e) => {
+    store[e.key] = e.value
+    return { value: undefined } as never
   })
   return files
 }
@@ -125,7 +133,7 @@ test('the band shows that masking is on, on terminal and desktop', async ($, on)
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'client-mask', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
-    expect(await ui.find({ type: 'Button', label: '🔒 Masking on' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /2 names/ })).toBeDefined()
     await ui.unmount()
   }
@@ -161,20 +169,20 @@ test("a reply on screen shows the real name; what reached the model does not cha
 })
 
 test('the masking button switches masking off and back on', async ($, on) => {
-  disk(on, JSON.stringify({ terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }, { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] }] }))
+  disk(on, JSON.stringify({ startOn: true, terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }, { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] }] }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return h(Box, {}) as never
   })
   on('ui.status', () => ({ value: undefined }) as never)
-  on('ui.toast', () => undefined as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
-  expect(await ui.find({ type: 'Button', label: '🔒 Masking on' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeDefined()
   await ui.press({ key: 'mask' })
-  expect(await ui.find({ type: 'Button', label: '⚠ Masking off' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '⚠ Masking off' })).toBeDefined()
   await ui.press({ key: 'mask' })
-  expect(await ui.find({ type: 'Button', label: '🔒 Masking on' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -185,7 +193,7 @@ test('while masking is off for the session, placeholders are no longer swapped',
     return h(Box, {}) as never
   })
   on('ui.status', () => ({ value: undefined }) as never)
-  on('ui.toast', () => undefined as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
   let written = ''
   on('tool.call', ($, e) => {
     written = JSON.stringify(e)
@@ -194,7 +202,7 @@ test('while masking is off for the session, placeholders are no longer swapped',
   await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
   const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
   await ui.press({ key: 'mask' })
-  expect(await ui.find({ type: 'Button', label: '⚠ Masking off' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '⚠ Masking off' })).toBeDefined()
   await $.tool.call({ tool: 'Write', file_path: '/x/CLIENT_3.md', content: 'hi' } as never)
   expect(written).toContain('/x/CLIENT_3.md')
   await ui.unmount()
@@ -210,7 +218,7 @@ test('the edit button opens the list in the text editor', async ($, on) => {
   const toasts: string[] = []
   on('ui.toast', ($, e) => {
     toasts.push(e.text)
-    return undefined as never
+    return { value: undefined } as never
   })
   const ran: string[][] = []
   on('process.run', ($, e) => {
@@ -225,4 +233,146 @@ test('the edit button opens the list in the text editor', async ($, on) => {
     expect(toasts.at(-1)).toContain('open in your text editor')
     await ui.unmount()
   }
+})
+
+// A pretend model step beneath the plugin: a tool call whose arguments arrive
+// in pieces, a name split across two of them.
+const stepBeneath = (on: On, pieces: string[]) => {
+  on('turn.step', async function* () {
+    yield { kind: 'tool', index: 0, id: 't1', name: 'Agent' }
+    for (const json of pieces) yield { kind: 'input', index: 0, json }
+    yield { kind: 'stop', stopReason: 'tool_use', usage: null }
+    return { turnId: 'x', index: 0, answer: '', toolUses: [{ name: 'Agent', input: JSON.parse(pieces.join('')) }], stopReason: 'tool_use', usage: null }
+  } as never)
+}
+
+const runStep = async ($: Engine, messageCount = 1) => {
+  const stream = $.turn.step({ turnId: 'x', index: 0, model: 'm', messageCount } as never)
+  const chunks: { kind: string; json?: string }[] = []
+  for await (const c of stream) chunks.push(c as never)
+  return { chunks, result: await stream.result }
+}
+
+test("a name the model writes into a tool call is masked before it is stored", async ($, on) => {
+  disk(on)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
+  stepBeneath(on, ['{"prompt":"brief for Northwind ', 'Revenue, ask Priya Okafor"}'])
+  const { chunks, result } = await runStep($)
+  const json = chunks.filter(c => c.kind === 'input').map(c => c.json).join('')
+  expect(json).not.toContain('Northwind')
+  expect(JSON.parse(json).prompt).toBe('brief for CLIENT_3, ask PERSON_1')
+  expect(JSON.stringify(result)).not.toContain('Northwind')
+})
+
+test("a tool call with nothing to mask streams through unchanged", async ($, on) => {
+  disk(on)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
+  stepBeneath(on, ['{"prompt":', '"plain"}'])
+  const { chunks } = await runStep($)
+  expect(chunks.filter(c => c.kind === 'input').map(c => c.json)).toEqual(['{"prompt":', '"plain"}'])
+})
+
+test("a name in an earlier tool call of the model's does not stop the conversation", async ($, on) => {
+  disk(on)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 't0', name: 'Agent', input: { prompt: 'Northwind Revenue brief' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't0', content: 'launched' }] },
+    ],
+  }) as never)
+  stepBeneath(on, ['{"prompt":"ok"}'])
+  const { chunks } = await runStep($)
+  expect(JSON.stringify(chunks)).not.toContain('stopped this request')
+})
+
+test("a name in clear text in what the model is sent still stops the request", async ($, on) => {
+  disk(on)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't0', content: 'row for Northwind Revenue' }] }] }) as never)
+  stepBeneath(on, ['{"prompt":"ok"}'])
+  const { chunks } = await runStep($)
+  expect(JSON.stringify(chunks)).toContain('stopped this request')
+})
+
+test('SAP in a tool call the model writes stays SAP, in the stream and for local tools', async ($, on) => {
+  disk(on, JSON.stringify({ startOn: true, terms: [{ real: 'TRM', placeholder: 'SAP' }] }))
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
+  let seen = ''
+  on('tool.call', ($, e) => {
+    seen = JSON.stringify(e)
+    return { result: { content: 'ok' } } as never
+  })
+  stepBeneath(on, ['{"prompt":"SAP ', 'migration"}'])
+  const { chunks } = await runStep($)
+  expect(chunks.filter(c => c.kind === 'input').map(c => c.json).join('')).toBe('{"prompt":"SAP migration"}')
+  await $.tool.call({ tool: 'Write', file_path: '/x/a.md', content: 'SAP plan' } as never)
+  expect(seen).toContain('SAP plan')
+  expect(seen).not.toContain('TRM')
+})
+
+test('masking switched on mid-conversation: what was already sent never stops it; what is new is still checked', async ($, on) => {
+  disk(on, JSON.stringify({ terms: [{ real: 'TRM', placeholder: 'SAP' }] }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  let messages: unknown[] = []
+  on('session.messages', () => ({ value: messages }) as never)
+  stepBeneath(on, ['{"prompt":"ok"}'])
+  await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  // A new session starts with masking off: the wiki loads and "what is TRM?" goes out as written.
+  expect(await ui.find({ type: 'Button', text: '⚠ Masking off' })).toBeDefined()
+  messages = [{ role: 'user', content: 'what is TRM?' }]
+  expect(JSON.stringify((await runStep($, 1)).chunks)).not.toContain('stopped this request')
+  // Masking switched on for this session: the conversation carries on.
+  await ui.press({ key: 'mask' })
+  messages = [...messages, { role: 'assistant', content: 'an answer' }, { role: 'user', content: 'and SAP pricing?' }]
+  expect(JSON.stringify((await runStep($, 3)).chunks)).not.toContain('stopped this request')
+  // Something new in clear text is still stopped.
+  messages = [...messages, { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't9', content: 'TRM config dump' }] }]
+  expect(JSON.stringify((await runStep($, 4)).chunks)).toContain('stopped this request')
+  await ui.unmount()
+})
+
+test('a new session starts with masking off: nothing is masked until it is switched on', async ($, on) => {
+  disk(on, JSON.stringify({ terms: [{ real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] }))
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  let seen = ''
+  on('tool.call', ($, e) => {
+    seen = JSON.stringify(e)
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Write', file_path: '/x/CLIENT_3.md', content: 'hi' } as never)
+  expect(seen).toContain('/x/CLIENT_3.md')
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  expect(await ui.find({ type: 'Button', text: '⚠ Masking off' })).toBeDefined()
+  await ui.press({ key: 'mask' })
+  expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeDefined()
+  await $.tool.call({ tool: 'Write', file_path: '/x/CLIENT_3.md', content: 'hi' } as never)
+  expect(seen).toContain('/x/Northwind Revenue.md')
+  await ui.unmount()
+})
+
+test('the list folder stays private even while masking is off', async ($, on) => {
+  disk(on, JSON.stringify({ terms: [] }))
+  on('ui.status', () => ({ value: undefined }) as never)
+  const listFile = [HOME, '.claude', 'client' + '-mask', 'terms.json'].join('/')
+  const r = await $.tool.call({ tool: 'Read', file_path: listFile } as never)
+  expect(JSON.stringify(r)).toContain('private')
 })

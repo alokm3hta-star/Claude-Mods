@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepResult } from 'claude-code'
 
-import { BINARY_FILE, Masker, REMOVED, mapStrings, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, Masker, REMOVED, mapStrings, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
 import { scrubFile } from './scrub'
 import type { MaskStatus } from '../types'
@@ -36,8 +36,17 @@ const TEMPLATE = {
 // items the last message carried masked. Counts only, never what was masked.
 const statusAtom = atom({ plugin: 'client-mask', key: 'status' } as const, null)
 const maskedAtom = atom({ plugin: 'client-mask', key: 'masked' } as const, 0)
-// This session only: masking switched off from the band. A new session starts on.
-const pausedAtom = atom({ plugin: 'client-mask', key: 'paused' } as const, false)
+// This session only: masking switched on or off from the band. Unset (null), a
+// session starts off, so masking applies only where you switch it on; the
+// list's "startOn": true starts every session on instead.
+const pausedAtom = atom({ plugin: 'client-mask', key: 'paused' } as const, null as boolean | null)
+// Sessions that had masking on, by id, with when: only their saved copies are
+// cleaned. Kept across sessions; entries older than the clean-up window go.
+const MASKED_KEY = 'maskedSessions'
+// How many messages of each loop (main, or a subagent's id) already went to the
+// model in an earlier request. Those are not checked again: resending them tells
+// the model nothing new, so switching masking on mid-conversation never stops it.
+const sentAtom = atom({ plugin: 'client-mask', key: 'sent' } as const, {} as Record<string, number>)
 
 let masker: Masker | null = null
 let markedSession = ''
@@ -111,7 +120,8 @@ const markSession = async ($: EngineInterface) => {
 // Never throws: a list it cannot read stops sending rather than sending unmasked.
 const ensure = async ($: EngineInterface) => {
   await load($)
-  paused = await read($, pausedAtom)
+  paused = (await read($, pausedAtom)) ?? config?.startOn !== true
+  if (isOn()) await rememberMasked($)
   try {
     await markSession($)
   } catch {
@@ -223,6 +233,60 @@ const savedConversations = async ($: EngineInterface, pick: (session: string, mt
   return found
 }
 
+// The model's tool calls, masked as they stream in. The engine stores a tool
+// call as the model wrote it and no later hook can rewrite it, so this is the
+// one place a name the model writes into a tool call (an agent's brief, a
+// search) is caught. Each call's argument pieces are held until the call ends,
+// so a name split across pieces is still found; unchanged calls pass as sent.
+type StepChunk = TurnStepChunk
+const maskToolArgs = async function* (stream: HookStream<StepChunk, TurnStepResult>, m: Masker): AsyncGenerator<StepChunk, TurnStepResult> {
+  let held: { index: number; chunks: StepChunk[]; json: string } | null = null
+  const flush = function* (): Generator<StepChunk> {
+    if (!held) return
+    const { index, chunks, json } = held
+    held = null
+    const masked = maskArgsJson(json, s => m.mask(s))
+    if (masked === json) yield* chunks
+    else yield { kind: 'input', index, json: masked }
+  }
+  for await (const c of stream) {
+    if (c.kind === 'input') {
+      if (held && held.index !== c.index) yield* flush()
+      held ??= { index: c.index, chunks: [], json: '' }
+      held.chunks.push(c)
+      held.json += c.json
+      continue
+    }
+    // An item the engine does not model can arrive mid-call; it does not end it.
+    if (c.kind !== 'engine') yield* flush()
+    yield c
+  }
+  yield* flush()
+  const r = await stream.result
+  return { ...r, toolUses: r.toolUses.map(t => ({ ...t, input: mapStrings(t.input, s => m.mask(s)) })) }
+}
+
+const maskedSessions = async ($: EngineInterface): Promise<Record<string, number>> => {
+  const v = await $.store.get(MASKED_KEY)
+  return v && typeof v === 'object' ? (v as Record<string, number>) : {}
+}
+
+let remembered = ''
+// Never throws: failing to remember only means this conversation's saved copy
+// is not cleaned when it closes; masking itself carries on.
+const rememberMasked = async ($: EngineInterface) => {
+  try {
+    const id = await $.session.id()
+    if (id === remembered) return
+    const now = await $.clock.now()
+    const kept = Object.fromEntries(Object.entries(await maskedSessions($)).filter(([, t]) => now - t < RECENT_MS))
+    await $.store.set(MASKED_KEY, { ...kept, [id]: now })
+    remembered = id
+  } catch {
+    // Tried again on the next check.
+  }
+}
+
 const scrubHistory = ($: EngineInterface) => (home ? scrubPath($, `${home}/.claude/history.jsonl`) : Promise.resolve())
 
 export const register: Register = on => {
@@ -237,9 +301,11 @@ export const register: Register = on => {
     void (async () => {
       const id = await $.session.id()
       const now = await $.clock.now()
-      const files = await savedConversations($, (s, t) => s !== id && now - t > IDLE_MS && now - t < RECENT_MS)
+      // Only conversations that had masking on: the others are left as written.
+      const masked = await maskedSessions($)
+      const files = await savedConversations($, (s, t) => s !== id && s in masked && now - t > IDLE_MS && now - t < RECENT_MS)
       for (const f of files) await scrubPath($, f)
-      await scrubHistory($)
+      if (files.length > 0) await scrubHistory($)
     })().catch(() => {})
     return next(e)
   })
@@ -249,6 +315,8 @@ export const register: Register = on => {
   on('session.end', async ($, e, next) => {
     const r = await next(e)
     await ensure($)
+    // A conversation that never had masking on is left as written.
+    if (!(e.sessionId in (await maskedSessions($)))) return r
     for (const f of await savedConversations($, s => s === e.sessionId)) await scrubPath($, f)
     await scrubHistory($)
     return r
@@ -366,22 +434,33 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     await ensure($)
     let note: string | null = null
+    const loop = e.agentId ?? 'main'
+    let from = (await read($, sentAtom))[loop] ?? 0
+    // Fewer messages than were sent: the conversation was compacted, its summary
+    // written by the model from what it was already sent. Only the newest is new.
+    if (e.messageCount < from) from = Math.max(0, e.messageCount - 1)
     if (broken) note = stopped()
     else if (isOn() && masker && config?.onLeak !== 'off') {
       const messages = e.agentId ? await $.session.messages({ as: 'api', agentId: e.agentId }) : await $.session.messages({ as: 'api' })
-      const hits = Array.isArray(messages) ? masker.leaks(scannable(messages)) : []
+      // Only what was added since the last request: earlier messages, sent while
+      // masking was off or before a name joined the list, already reached the model.
+      const hits = Array.isArray(messages) ? masker.leaks(scannable(messages.slice(from))) : []
       if (hits.length > 0) {
         note =
-          `client-mask stopped this request: the name behind ${hits.join(', ')} is still in clear text ` +
-          '(usually because the list changed mid-conversation). Close Claude Code and reopen this conversation: ' +
-          'its saved copy is cleaned as it closes, so nothing is lost.'
+          `client-mask stopped this request: the name behind ${hits.join(', ')} is in clear text in what was about to be sent. ` +
+          'Send your message again; if this repeats, close Claude Code and reopen this conversation: its saved copy is cleaned as it closes.'
         if (config?.onLeak === 'warn') {
           $.ui.toast(note, { timeoutMs: 10000 })
           note = null
         }
       }
     }
-    if (note === null) return yield* next(e)
+    if (note === null) {
+      const count = e.messageCount
+      await update($, sentAtom, m => ({ ...(m ?? {}), [loop]: count }))
+      if (!isOn() || !masker) return yield* next(e)
+      return yield* maskToolArgs(next(e), masker)
+    }
     $.ui.toast(note, { timeoutMs: 10000 })
     yield { kind: 'text', index: 0, text: note }
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
@@ -436,12 +515,17 @@ export const register: Register = on => {
       if (paused) {
         paused = false
         await update($, pausedAtom, () => false)
+        if (isOn()) await rememberMasked($)
+        $.ui.toast(
+          'Masking is on for this session only: what you send from now on is masked. Other sessions are not affected.',
+          { timeoutMs: 8000 },
+        )
       } else {
         paused = true
         await update($, pausedAtom, () => true)
         $.ui.toast(
           'Masking is off for this session: what you send now reaches Claude as written. ' +
-            'If a client name goes out while it is off, switching masking back on means closing and reopening this conversation.',
+            'Switch it back on at any time: what you send from then on is masked, while what Claude already read stays in this conversation.',
           { timeoutMs: 10000 },
         )
       }
@@ -467,7 +551,7 @@ export const register: Register = on => {
       ) : s.level === 'paused' ? (
         <Box flexDirection="row">
           <Button key="mask" label="⚠ Masking off" plain onPress={step} />
-          <Text color="warning">{'  ·  this session only; click to switch back on'}</Text>
+          <Text dimColor>{'  ·  click to mask this session only'}</Text>
           {sep}
           <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
         </Box>

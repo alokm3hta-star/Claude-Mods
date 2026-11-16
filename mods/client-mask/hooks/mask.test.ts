@@ -141,3 +141,27 @@ test('SAP is masked to but never turned back into a name, on screen or in tools'
   expect(m.display('SAP for CLIENT_3', false)).toBe('SAP for NWR🔒')
   expect(m.legend().some(([ph]) => ph === 'SAP')).toBe(false)
 })
+
+test('TRM masked to SAP: SAP from the model always comes back as SAP, never TRM', async () => {
+  const m = new Masker({ terms: [{ real: 'TRM', placeholder: 'SAP' }, { real: 'Northwind', placeholder: 'CLIENT_3' }] })
+  expect(m.mask('TRM go-live')).toBe('SAP go-live')
+  // A reply from the model, on screen: SAP stays SAP and carries no 🔒.
+  expect(m.display('SAP and **SAP** for CLIENT_3', true)).toBe('SAP and **SAP** for **Northwind**🔒')
+  expect(m.display('SAP for CLIENT_3', false)).toBe('SAP for Northwind🔒')
+  // A local tool call (a file Claude writes): SAP stays SAP.
+  expect(m.restore('SAP note for CLIENT_3')).toBe('SAP note for Northwind')
+  expect(m.legend().some(([ph]) => ph === 'SAP')).toBe(false)
+  // SAP written by the model is never masked again into anything else.
+  expect(m.mask('SAP and SAP BTP')).toBe('SAP and SAP BTP')
+})
+
+test('SAP is kept as is however the list spells it, and keepAsIs adds more', async () => {
+  for (const placeholder of ['Sap', 'SAP ', 'sap']) {
+    const m = new Masker({ terms: [{ real: 'TRM', placeholder }] })
+    expect(m.restore(placeholder)).toBe(placeholder)
+    expect(m.display(placeholder, false)).toBe(placeholder)
+  }
+  const m = new Masker({ keepAsIs: ['BTP'], terms: [{ real: 'Kyma Cluster X', placeholder: 'BTP' }] })
+  expect(m.restore('BTP')).toBe('BTP')
+  expect(validate({ keepAsIs: 'BTP', terms: [] })).toEqual(['the list\'s "keepAsIs" must be a list of placeholders'])
+})

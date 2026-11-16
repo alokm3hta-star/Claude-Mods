@@ -43,5 +43,5 @@ test('a typed-prompt history line is masked; a broken line is masked as text', a
   const r = scrubFile(text, mask)
   expect(r.changed).toBe(true)
   expect(r.text).not.toContain('Northwind Revenue')
-  expect(JSON.parse(r.text.split('\n')[0]).project).toBe('/work')
+  expect(JSON.parse(r.text.split('\n')[0] ?? '').project).toBe('/work')
 })

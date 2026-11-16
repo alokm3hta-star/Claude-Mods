@@ -40,6 +40,12 @@ export type Config = {
   blockedFolders?: string[]
   // Show the real names again in replies on your screen, marked 🔒. Default true.
   showRealNames?: boolean
+  // Placeholders that are real words in their own right (SAP always is): names
+  // are masked to them but they are never turned back, on screen or in tools.
+  keepAsIs?: string[]
+  // Start every session with masking on. Default false: masking is off until
+  // you switch it on for a session from the band above the prompt.
+  startOn?: boolean
   terms: Entry[]
 }
 
@@ -56,6 +62,7 @@ export const validate = (config: unknown): string[] => {
   const strings = (v: unknown) => Array.isArray(v) && v.every(s => typeof s === 'string')
   if (c.blockedFolders !== undefined && !strings(c.blockedFolders)) problems.push('the list\'s "blockedFolders" must be a list of folder paths')
   if (c.keep !== undefined && !strings(c.keep)) problems.push('the list\'s "keep" must be a list of values')
+  if (c.keepAsIs !== undefined && !strings(c.keepAsIs)) problems.push('the list\'s "keepAsIs" must be a list of placeholders')
   if (c.detect !== undefined && (typeof c.detect !== 'object' || c.detect === null)) problems.push('the list\'s "detect" must be an object of true/false switches')
   const realTo = new Map<string, string>()
   c.terms.forEach((t, i) => {
@@ -105,7 +112,10 @@ export const REMOVED = '(removed)'
 
 // Placeholders that are a real word in their own right. Several names may be
 // masked to one, but it is never turned back into any of them: SAP stays SAP.
+// Compared ignoring case and surrounding spaces, so "Sap" or "SAP " counts too;
+// the list's "keepAsIs" adds more (e.g. ["BTP"]).
 export const KEEP_AS_IS: ReadonlySet<string> = new Set(['SAP'])
+const keyOf = (s: string) => s.trim().toUpperCase()
 
 export class Masker {
   private readonly rules: Rule[] = []
@@ -120,6 +130,7 @@ export class Masker {
   constructor(config: Config) {
     this.detector = new Detector(config.detect, [...DEFAULT_KEEP, ...(config.keep ?? [])])
     const wholeDefault = config.wholeWord ?? true
+    const keepAsIs = new Set([...KEEP_AS_IS, ...(config.keepAsIs ?? [])].map(keyOf))
     const literals: (Rule & { length: number })[] = []
     const patterns: Rule[] = []
     const companions = (t: Entry) => (t.onlyWith ? t.onlyWith.map(w => this.companion(config, w)) : undefined)
@@ -135,7 +146,7 @@ export class Masker {
         this.removedNames.push(t.real)
         continue
       }
-      if (KEEP_AS_IS.has(t.placeholder)) continue
+      if (keepAsIs.has(keyOf(t.placeholder))) continue
       if (!this.shown.has(t.placeholder)) this.shown.set(t.placeholder, t.real)
       if (t.toFiles !== false && !this.back.has(t.placeholder)) this.back.set(t.placeholder, t.real)
     }
@@ -352,8 +363,23 @@ export const maskContent = (content: unknown, mask: (s: string) => string): unkn
   return content
 }
 
-// The text of a conversation the guard scans: everything but signed thinking
-// and binary media.
+// A tool call's arguments as the model streams them, JSON text: masked value by
+// value when it parses (so the JSON stays valid), else as plain text.
+export const maskArgsJson = (json: string, mask: (s: string) => string): string => {
+  if (json.trim() === '') return json
+  try {
+    return JSON.stringify(mapStrings(JSON.parse(json), mask))
+  } catch {
+    return mask(json)
+  }
+}
+
+// The text of a conversation the guard scans: everything but signed thinking,
+// binary media and the model's own tool calls.
+// A tool call is the model's output: whatever it carries came from the model,
+// so sending it back tells the model nothing new. The engine also keeps tool
+// calls as the model wrote them (a stored row cannot be rewritten), so scanning
+// them would stop every later request of the conversation for good.
 // One piece per message text, tool input value, tool output or document, so
 // each is judged on its own, as it was masked.
 export const scannable = (messages: { content: unknown }[]): string[] => {
@@ -368,8 +394,8 @@ export const scannable = (messages: { content: unknown }[]): string[] => {
       if (src?.type === 'text' && typeof src.data === 'string') parts.push(src.data)
       return
     }
+    if (block.type === 'tool_use' || block.type === 'server_tool_use') return
     if (typeof block.text === 'string') parts.push(block.text)
-    if (block.type === 'tool_use') mapStrings(block.input, v => (parts.push(v), v))
     if (block.type === 'tool_result') {
       if (typeof block.content === 'string') parts.push(block.content)
       else if (Array.isArray(block.content)) block.content.forEach(walk)
