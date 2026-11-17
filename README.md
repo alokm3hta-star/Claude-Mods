@@ -53,6 +53,20 @@ client-mask needs two steps beyond the install line, because some of its protect
 
 To check what the script would change without changing anything, add `--dry-run`.
 
+### Masking one way only
+
+To never turn a placeholder back into the real value, in chat or in files, add these to your list next to `terms`:
+
+```json
+"restoreInTools": [],
+"showRealNames": false,
+"maskFilesInPlace": true
+```
+
+With `maskFilesInPlace`, each text file is masked on disk before Claude reads, edits or greps it, or runs a command that names it. What Claude sees then matches the file, and auto mode sees no rewritten call. A copy of each original is kept in an `originals` folder beside your list, which Claude cannot open; `"keepOriginals": false` keeps none. Folders listed in `"keepOnDisk"` are never rewritten; what Claude reads from them is still masked on the way in.
+
+`/client-mask-folder <folder>` masks every text file under a folder on disk at once, inside the mod, with no model involved. It skips hidden folders such as `.git`, `node_modules`, links, files that are not text and files over 5 MB, and its reply gives counts only.
+
 ## Add a new mod
 
 1. Put the mod in `mods/<mod-name>/`, with `.claude-plugin/plugin.json`, `hooks/hooks.json` and `hooks/register.tsx`. The folder name must match the `name` in `plugin.json`.

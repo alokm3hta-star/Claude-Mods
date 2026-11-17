@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { KEEP_AS_IS, Masker, REMOVED, namesList, validate } from './mask'
+import { KEEP_AS_IS, Masker, REMOVED, commandPaths, insideAny, namesList, shellWords, validate } from './mask'
 import type { Config } from './mask'
 
 const LIST: Config = {
@@ -164,4 +164,15 @@ test('SAP is kept as is however the list spells it, and keepAsIs adds more', asy
   const m = new Masker({ keepAsIs: ['BTP'], terms: [{ real: 'Kyma Cluster X', placeholder: 'BTP' }] })
   expect(m.restore('BTP')).toBe('BTP')
   expect(validate({ keepAsIs: 'BTP', terms: [] })).toEqual(['the list\'s "keepAsIs" must be a list of placeholders'])
+})
+
+
+test('shell words: quotes, escapes and separators', () => {
+  expect(shellWords(`cd "/a b" && grep -n 'x y' f\\ g.md|wc -l`)).toEqual(['cd', '/a b', '&', '&', 'grep', '-n', 'x y', 'f g.md', '|', 'wc', '-l'])
+})
+
+test('the files a command names, following cd, skipping options, variables and globs', () => {
+  expect(commandPaths('cd sub; grep -n TRM plan.md ~/n.md $F *.md x=1', '/w', '/h')).toEqual(['/w/sub/grep', '/w/sub/TRM', '/w/sub/plan.md', '/h/n.md'])
+  expect(insideAny('/h/wiki/p.md', ['~/wiki'], '/h')).toBe(true)
+  expect(insideAny('/h/wikis/p.md', ['~/wiki'], '/h')).toBe(false)
 })

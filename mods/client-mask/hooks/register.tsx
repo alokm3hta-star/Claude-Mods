@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepResult } from 'claude-code'
 
-import { BINARY_FILE, Masker, REMOVED, mapStrings, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, Masker, REMOVED, commandPaths, insideAny, mapStrings, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
 import { scrubFile } from './scrub'
 import type { MaskStatus } from '../types'
@@ -11,6 +11,7 @@ import type { MaskStatus } from '../types'
 const DIR = '.claude/client-mask'
 const VIEW = 'client-mask-view'
 const EDIT = 'client-mask-edit'
+const FOLDER = 'client-mask-folder'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -25,7 +26,12 @@ const TEMPLATE = {
     'Add "toFiles": false to a row to keep its placeholder even in files Claude writes (for people\'s names and IDs). ' +
     'Emails, phone numbers, NI numbers, IBANs, card numbers, VAT numbers and secrets are masked without being listed; ' +
     'switch one off with "detect": {"phone": false}, and list values to leave alone in "keep". ' +
-    'List folders of real client data Claude may never open in "blockedFolders".',
+    'List folders of real client data Claude may never open in "blockedFolders". ' +
+    'To never turn placeholders back, set "restoreInTools": [] (files and commands) and "showRealNames": false (your screen); ' +
+    'a full rewrite of a file that holds real names is then refused, unless "guardOverwrites": false. ' +
+    'Or set "maskFilesInPlace": true to mask each text file on disk before Claude reads, edits, greps or runs a command on it ' +
+    '(a copy of the original is kept where Claude cannot open it; "keepOriginals": false keeps none; ' +
+    'folders in "keepOnDisk" are never rewritten). /client-mask-folder <folder> masks a whole folder on disk at once, with no model involved.',
   detect: {},
   keep: [],
   blockedFolders: [],
@@ -295,6 +301,127 @@ const rememberMasked = async ($: EngineInterface) => {
   }
 }
 
+// What a Write would lose: the placeholders (or labels) of listed names and
+// personal data in the file on disk that the text written no longer carries.
+// null when nothing is lost or there is no file yet; an empty list when the
+// file exists but cannot be read, which refuses the write rather than risk it.
+// Names only the placeholder, never the real value, as the refusal reaches Claude.
+export const overwriteLoses = async ($: EngineInterface, m: Masker, path: string, content: string, restores: boolean): Promise<string[] | null> => {
+  let before: string
+  try {
+    if (!(await $.fs.exists(path))) return null
+    before = await $.fs.read(path)
+  } catch {
+    return []
+  }
+  const onDisk = m.leaks(before)
+  if (onDisk.length === 0) return null
+  const kept = new Set(m.leaks(restores ? m.restore(content) : content))
+  const lost = onDisk.filter(p => !kept.has(p))
+  return lost.length > 0 ? lost : null
+}
+
+// Tools whose file is masked on disk first, with "maskFilesInPlace".
+const IN_PLACE = ['Read', 'Edit', 'MultiEdit']
+const IN_PLACE_MAX_BYTES = 5 * 1024 * 1024
+// Copies of files as they were before masking: inside the list's own folder,
+// which no tool call may name, so Claude can never open them.
+export const ORIGINALS = `${DIR}/originals`
+
+// Masks a text file on disk, in place. 'masked' or 'unchanged' (nothing to
+// mask, or no file yet); 'skipped' for what is not a text file or is too large,
+// left alone (a read of it is still masked on the way in); 'failed' only when a
+// file that needed masking could not be written.
+export type InPlace = 'masked' | 'unchanged' | 'skipped' | 'failed'
+const NUL = String.fromCharCode(0)
+const UNDECODABLE = String.fromCharCode(0xfffd)
+export const maskFileInPlace = async ($: EngineInterface, m: Masker, path: string, keepOriginal: boolean): Promise<InPlace> => {
+  let text: string
+  try {
+    if (!(await $.fs.exists(path))) return 'unchanged'
+    if (BINARY_FILE.test(path)) return 'skipped'
+    const { kind, size } = await $.fs.stat(path)
+    if (kind !== 'file' || size > IN_PLACE_MAX_BYTES) return 'skipped'
+    text = await $.fs.read(path)
+  } catch {
+    return 'skipped'
+  }
+  if (text.includes(NUL) || text.includes(UNDECODABLE)) return 'skipped'
+  const masked = m.mask(text)
+  if (masked === text) return 'unchanged'
+  try {
+    const home = (await $.env.get('HOME')) ?? ''
+    if (keepOriginal && home !== '') {
+      const copy = `${home}/${ORIGINALS}${path.startsWith('/') ? '' : '/'}${path}`
+      if (!(await $.fs.exists(copy))) {
+        await $.fs.write(copy, text)
+        await $.process.run(['chmod', '600', copy])
+      }
+    }
+    const tmp = `${path}.client-mask-tmp`
+    await $.fs.write(tmp, masked)
+    const { exitCode } = await $.process.run(['mv', '-f', tmp, path])
+    return exitCode === 0 ? 'masked' : 'failed'
+  } catch {
+    return 'failed'
+  }
+}
+
+// Every file under a folder, skipping hidden folders (.git and the like),
+// node_modules and links; capped so a wrong folder cannot run away.
+const FOLDER_MAX_FILES = 20000
+const filesUnder = async ($: EngineInterface, root: string): Promise<string[]> => {
+  const found: string[] = []
+  const walk = async (dir: string) => {
+    for (const f of await $.fs.list(dir)) {
+      if (found.length >= FOLDER_MAX_FILES || f.isLink) continue
+      const p = `${dir}/${f.name}`
+      if (f.kind === 'dir') {
+        if (!f.name.startsWith('.') && f.name !== 'node_modules') await walk(p)
+      } else if (f.kind === 'file') found.push(p)
+    }
+  }
+  await walk(root)
+  return found
+}
+
+// /client-mask-folder <folder>: masks every text file under a folder on disk,
+// by your list, here on this computer; no model reads or writes any of it. The
+// answer gives counts only: it reaches the conversation, so it names no file.
+export const maskFolder = async ($: EngineInterface, args: string): Promise<string> => {
+  await ensure($)
+  if (broken) return stopped()
+  if (!masker || config?.enabled === false) return 'client-mask: masking is switched off in your list, so nothing was changed.'
+  const m = masker
+  const arg = args.trim().replace(/^["']|["']$/g, '')
+  if (arg === '') return 'Give the folder to mask: /client-mask-folder <folder>. Every text file under it is masked on disk by your list.'
+  const expanded = arg === '~' ? home : arg.startsWith('~/') ? `${home}${arg.slice(1)}` : arg
+  const root = (expanded.startsWith('/') ? expanded : `${await $.session.cwd()}/${expanded}`).replace(/\/+$/, '')
+  if (root === '' || root === home || root === `${home}/.claude` || root.startsWith(`${home}/.claude/`)) {
+    return "client-mask: that folder is too broad or holds Claude's own files, so nothing was changed. Pick a project or document folder."
+  }
+  if (!(await $.fs.exists(root))) return 'client-mask: that folder does not exist, so nothing was changed.'
+  const { kind } = await $.fs.stat(root)
+  const files = kind === 'dir' ? await filesUnder($, root) : [root]
+  const keep = config?.keepOnDisk ?? []
+  const n = { masked: 0, unchanged: 0, skipped: 0, failed: 0 }
+  for (const f of files) {
+    if (insideAny(f, keep, home)) {
+      n.skipped++
+      continue
+    }
+    n[await maskFileInPlace($, m, f, config?.keepOriginals !== false)]++
+  }
+  const plural = (k: number, one: string) => `${k} ${one}${k === 1 ? '' : 's'}`
+  return (
+    `Masked ${plural(n.masked, 'file')} on disk; ${n.unchanged} had nothing to mask; ` +
+    `${n.skipped} left as they were (not text, over 5 MB, or in a keepOnDisk folder)` +
+    (n.failed > 0 ? `; ${n.failed} could not be written` : '') +
+    (files.length >= FOLDER_MAX_FILES ? `; stopped at ${FOLDER_MAX_FILES} files` : '') +
+    (n.masked > 0 && config?.keepOriginals !== false ? ". A copy of each original is in your list's private folder." : '.')
+  )
+}
+
 const scrubHistory = ($: EngineInterface) => (home ? scrubPath($, `${home}/.claude/history.jsonl`) : Promise.resolve())
 
 export const register: Register = on => {
@@ -304,6 +431,7 @@ export const register: Register = on => {
     $.clock.every(5000, () => void ensure($))
     await $.command.register({ name: VIEW, description: 'Show which placeholder stands for which client term (on screen only)' })
     await $.command.register({ name: EDIT, description: 'Open your masking list in your text editor (Claude never sees it)' })
+    await $.command.register({ name: FOLDER, description: 'Mask every text file under a folder on disk by your list, locally; no model is involved' })
     // Catches conversations that closed without cleaning up (a crash, a forced
     // quit): recent ones, idle long enough that no session still writes them.
     void (async () => {
@@ -429,9 +557,36 @@ export const register: Register = on => {
           'Convert the file to text first (for a PDF: pdftotext "<file>" -), then read the text.',
       }
     }
-    if (!toolMatches(tool, config.restoreInTools ?? DEFAULT_RESTORE)) return next(e)
-    // Claude's own notes and settings keep the placeholders.
-    if (home !== '' && path.startsWith(`${home}/.claude/`)) return next(e)
+    const restores = toolMatches(tool, config.restoreInTools ?? DEFAULT_RESTORE) && !(home !== '' && path.startsWith(`${home}/.claude/`))
+    if (config.maskFilesInPlace === true) {
+      // The files this call touches: Read and Edit name one; Grep's path may be
+      // a file; a Bash command is read for every file it names.
+      const targets =
+        IN_PLACE.includes(tool) ? [path]
+        : tool === 'Grep' && typeof (e as { path?: unknown }).path === 'string' ? [(e as { path: string }).path]
+        : tool === 'Bash' ? commandPaths(String((e as { command?: unknown }).command ?? ''), await $.session.cwd(), home)
+        : []
+      const keep = config.keepOnDisk ?? []
+      for (const target of targets) {
+        if (target === '' || insideAny(target, keep, home)) continue
+        if ((await maskFileInPlace($, masker, target, config.keepOriginals !== false)) === 'failed') {
+          return { deny: 'client-mask: a file this call touches could not be masked on disk first, so the call was stopped. Check it is a text file you can write to.' }
+        }
+      }
+    }
+    if (tool === 'Write' && path !== '' && config.guardOverwrites !== false && config.maskFilesInPlace !== true) {
+      const lost = await overwriteLoses($, masker, path, String((e as { content?: unknown }).content ?? ''), restores)
+      if (lost !== null) {
+        return {
+          deny:
+            lost.length === 0
+              ? 'client-mask: this file could not be checked for real client names, so it was not overwritten. Use Edit to change only the parts that need changing.'
+              : `client-mask: this would overwrite a file that holds the real values behind ${lost.join(', ')}. ` +
+                'You only see them as placeholders, so a full rewrite would replace them for good. Use Edit to change only the parts that need changing, and leave those parts as they are.',
+        }
+      }
+    }
+    if (!restores) return next(e)
     const m = masker
     const restored = mapStrings(args, s => m.restore(s)) as typeof args
     // Pass the call on untouched when nothing was turned back: a call a hook
@@ -486,6 +641,8 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: EDIT }, async $ => ({ text: await openList($) }))
+
+  on('command.run', { command: FOLDER }, async ($, e) => ({ text: await maskFolder($, e.args) }))
 
   // After each answer, a pop-up naming what was masked, by placeholder only.
   on('turn.complete', async ($, e, next) => {

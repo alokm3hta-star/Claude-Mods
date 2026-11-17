@@ -1,7 +1,7 @@
 import { test, expect, mock } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { maskToolArgs } from './register'
+import { ORIGINALS, maskToolArgs } from './register'
 import { Masker } from './mask'
 
 const HOME = '/home/t'
@@ -50,6 +50,159 @@ test('a local tool gets the real values back; a web tool keeps placeholders; not
   expect(JSON.stringify(seen.Write)).toContain('Dear PERSON_1')
   expect(JSON.stringify(seen.WebSearch)).toContain('CLIENT_3 tax rules')
   expect(Object.keys(files)).toEqual([LIST_PATH])
+})
+
+test('with restoring off, a Write that would replace real names on disk is refused, naming placeholders only', async ($, on) => {
+  const files = disk(on, JSON.stringify({ ...LIST, restoreInTools: [] }))
+  files['/x/review.md'] = 'Prepared for Northwind Revenue by the team.'
+  let ran = false
+  on('tool.call', () => {
+    ran = true
+    return { result: { content: 'ok' } } as never
+  })
+  const r = await $.tool.call({ tool: 'Write', file_path: '/x/review.md', content: 'Prepared for CLIENT_3 by the team, revised.' } as never)
+  expect(ran).toBe(false)
+  expect(JSON.stringify(r)).toContain('CLIENT_3')
+  expect(JSON.stringify(r)).not.toContain('Northwind')
+})
+
+test('with restoring on, the same Write goes ahead: the real name is put back', async ($, on) => {
+  const files = disk(on)
+  files['/x/review.md'] = 'Prepared for Northwind Revenue by the team.'
+  let seen = ''
+  on('tool.call', ($, e) => {
+    seen = JSON.stringify(e)
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Write', file_path: '/x/review.md', content: 'Prepared for CLIENT_3 by the team, revised.' } as never)
+  expect(seen).toContain('Northwind Revenue')
+})
+
+test('a Write to a new file, or to a file with no listed names, is not held up', async ($, on) => {
+  const files = disk(on, JSON.stringify({ ...LIST, restoreInTools: [] }))
+  files['/x/plain.md'] = 'nothing listed here'
+  let runs = 0
+  on('tool.call', () => {
+    runs++
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Write', file_path: '/x/new.md', content: 'Draft for CLIENT_3' } as never)
+  await $.tool.call({ tool: 'Write', file_path: '/x/plain.md', content: 'Draft for CLIENT_3' } as never)
+  expect(runs).toBe(2)
+})
+
+test('the overwrite guard can be switched off in the list', async ($, on) => {
+  const files = disk(on, JSON.stringify({ ...LIST, restoreInTools: [], guardOverwrites: false }))
+  files['/x/review.md'] = 'Prepared for Northwind Revenue.'
+  let ran = false
+  on('tool.call', () => {
+    ran = true
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Write', file_path: '/x/review.md', content: 'Prepared for CLIENT_3.' } as never)
+  expect(ran).toBe(true)
+})
+
+// "maskFilesInPlace": the file itself is masked on disk before Claude reads or
+// edits it, so a later Edit matches and nothing ever needs turning back.
+const inPlace = (on: On, extra: Record<string, unknown> = {}) => {
+  const files = disk(on, JSON.stringify({ ...LIST, restoreInTools: [], showRealNames: false, maskFilesInPlace: true, ...extra }))
+  on('process.run', ($, e) => {
+    const argv = (e as unknown as { argv: string[] }).argv
+    const [cmd, , from, to] = argv
+    if (cmd === 'mv' && from !== undefined && to !== undefined) {
+      files[to] = files[from] ?? ''
+      delete files[from]
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  return files
+}
+
+test('with maskFilesInPlace, a file is masked on disk before Claude reads it; the original is kept privately', async ($, on) => {
+  const files = inPlace(on)
+  files['/x/review.md'] = 'Prepared for Northwind Revenue.\nSAP scope.'
+  let seen = ''
+  on('tool.call', ($, e) => {
+    seen = files['/x/review.md'] ?? ''
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/x/review.md' } as never)
+  expect(seen).toBe('Prepared for CLIENT_3.\nSAP scope.')
+  expect(files['/x/review.md.client-mask-tmp']).toBeUndefined()
+  expect(files[`${HOME}/${ORIGINALS}/x/review.md`]).toBe('Prepared for Northwind Revenue.\nSAP scope.')
+})
+
+test('with maskFilesInPlace, an Edit in placeholders matches the file on disk', async ($, on) => {
+  const files = inPlace(on)
+  files['/x/review.md'] = 'Owner: Northwind Revenue'
+  let seen: Record<string, unknown> = {}
+  on('tool.call', ($, e) => {
+    seen = { ...(e as Record<string, unknown>), onDisk: files['/x/review.md'] }
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Edit', file_path: '/x/review.md', old_string: 'Owner: CLIENT_3', new_string: 'Owner: CLIENT_3 (lead)' } as never)
+  expect(seen.onDisk).toBe('Owner: CLIENT_3')
+  expect(seen.old_string).toBe('Owner: CLIENT_3')
+})
+
+test('with keepOriginals false, no copy of the original is kept anywhere', async ($, on) => {
+  const files = inPlace(on, { keepOriginals: false })
+  files['/x/review.md'] = 'Prepared for Northwind Revenue.'
+  on('tool.call', () => ({ result: { content: 'ok' } }) as never)
+  await $.tool.call({ tool: 'Read', file_path: '/x/review.md' } as never)
+  expect(files['/x/review.md']).toBe('Prepared for CLIENT_3.')
+  expect(Object.keys(files).some(f => f.includes('/originals/'))).toBe(false)
+})
+
+test('maskFilesInPlace leaves files that are not text alone', async ($, on) => {
+  const files = inPlace(on)
+  files['/x/data.bin'] = 'Northwind Revenue\u0000\u0001'
+  on('tool.call', () => ({ result: { content: 'ok' } }) as never)
+  await $.tool.call({ tool: 'Read', file_path: '/x/data.bin' } as never)
+  expect(files['/x/data.bin']).toBe('Northwind Revenue\u0000\u0001')
+})
+
+test('without maskFilesInPlace, reading a file never changes it', async ($, on) => {
+  const files = disk(on)
+  files['/x/review.md'] = 'Prepared for Northwind Revenue.'
+  on('tool.call', () => ({ result: { content: 'ok' } }) as never)
+  await $.tool.call({ tool: 'Read', file_path: '/x/review.md' } as never)
+  expect(files['/x/review.md']).toBe('Prepared for Northwind Revenue.')
+})
+
+test('with maskFilesInPlace, a file a Bash command names is masked on disk before it runs: TRM is already SAP', async ($, on) => {
+  const files = inPlace(on, { terms: [...LIST.terms, { real: 'TRM', placeholder: 'SAP' }] })
+  on('session.cwd', () => ({ value: '/x' }) as never)
+  files['/x/plan.md'] = 'TRM go-live is in March.\nTRM interfaces: 12.'
+  let onDisk = ''
+  on('tool.call', () => {
+    onDisk = files['/x/plan.md'] ?? ''
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Bash', command: "grep -n 'SAP' plan.md" } as never)
+  expect(onDisk).toBe('SAP go-live is in March.\nSAP interfaces: 12.')
+})
+
+test('with maskFilesInPlace, a cd in the command is followed, and keepOnDisk folders are never rewritten', async ($, on) => {
+  const files = inPlace(on, { keepOnDisk: ['/wiki'] })
+  on('session.cwd', () => ({ value: '/x' }) as never)
+  files['/y/notes.md'] = 'for Northwind Revenue'
+  files['/wiki/page.md'] = 'for Northwind Revenue'
+  on('tool.call', () => ({ result: { content: 'ok' } }) as never)
+  await $.tool.call({ tool: 'Bash', command: 'cd /y && sed -i "" s/a/b/ notes.md; cat /wiki/page.md' } as never)
+  expect(files['/y/notes.md']).toBe('for CLIENT_3')
+  expect(files['/wiki/page.md']).toBe('for Northwind Revenue')
+  await $.tool.call({ tool: 'Read', file_path: '/wiki/page.md' } as never)
+  expect(files['/wiki/page.md']).toBe('for Northwind Revenue')
+})
+
+test('with maskFilesInPlace, a file Grep is pointed at is masked on disk first', async ($, on) => {
+  const files = inPlace(on)
+  files['/x/review.md'] = 'Owner: Northwind Revenue'
+  on('tool.call', () => ({ result: { content: 'ok' } }) as never)
+  await $.tool.call({ tool: 'Grep', pattern: 'Owner', path: '/x/review.md' } as never)
+  expect(files['/x/review.md']).toBe('Owner: CLIENT_3')
 })
 
 test('a local tool call with no placeholder is passed on as the same call', async ($, on) => {
@@ -346,6 +499,41 @@ for (const [label, pieces] of [
   })
 }
 
+// Regression: arguments in the API's own JSON formatting (spaces, escapes) were
+// re-serialised even with nothing to mask, so the engine marked the response
+// as rewritten by a mod and auto mode refused every Bash, Edit and Write call.
+test('API-formatted arguments with nothing to mask pass on as the very same chunks', async () => {
+  const m = new Masker(LIST as never)
+  const pieces = [
+    { kind: 'input', index: 0, json: '{"command": "ls -la ', ref: 2 },
+    { kind: 'input', index: 0, json: '\\u00e9t\\u00e9 \\/tmp", ', ref: 3 },
+    { kind: 'input', index: 0, json: '"description": "List \\u2014 files"}', ref: 4 },
+  ]
+  const stream = fakeStream([{ kind: 'tool', index: 0, id: 't1', name: 'Bash', ref: 1 }, ...pieces, { kind: 'engine', ref: 9 }])
+  const out: unknown[] = []
+  const gen = maskToolArgs(stream, m)
+  for (let r = await gen.next(); !r.done; r = await gen.next()) out.push(r.value)
+  const inputs = out.filter(c => (c as { kind: string }).kind === 'input')
+  expect(inputs.length).toBe(3)
+  inputs.forEach((c, i) => expect(c).toBe(pieces[i]))
+})
+
+test('API-formatted arguments with a name are still masked', async () => {
+  const m = new Masker(LIST as never)
+  const stream = fakeStream([
+    { kind: 'tool', index: 0, id: 't1', name: 'Agent', ref: 1 },
+    { kind: 'input', index: 0, json: '{"prompt": "brief for Northwind ', ref: 2 },
+    { kind: 'input', index: 0, json: 'Revenue \\u2014 draft"}', ref: 3 },
+    { kind: 'engine', ref: 9 },
+  ])
+  const out: { kind: string; json?: string }[] = []
+  const gen = maskToolArgs(stream, m)
+  for (let r = await gen.next(); !r.done; r = await gen.next()) out.push(r.value as never)
+  const json = out.filter(c => c.kind === 'input').map(c => c.json).join('')
+  expect(json).not.toContain('Northwind')
+  expect(JSON.parse(json).prompt).toContain('CLIENT_3')
+})
+
 test("a name in an earlier tool call of the model's does not stop the conversation", async ($, on) => {
   disk(on)
   on('ui.status', () => ({ value: undefined }) as never)
@@ -446,4 +634,71 @@ test('the list folder stays private even while masking is off', async ($, on) =>
   const listFile = [HOME, '.claude', 'client' + '-mask', 'terms.json'].join('/')
   const r = await $.tool.call({ tool: 'Read', file_path: listFile } as never)
   expect(JSON.stringify(r)).toContain('private')
+})
+
+// /client-mask-folder: every text file under a folder is masked on disk by the
+// list, inside the mod; no model is involved, and the answer names no file.
+const tree = (on: On, list: Record<string, unknown>) => {
+  const files: Record<string, string> = { [LIST_PATH]: JSON.stringify(list) }
+  const isDir = (p: string) => Object.keys(files).some(f => f.startsWith(`${p}/`))
+  mock.env(on, { HOME })
+  mock.clock(on)
+  on('session.cwd', () => ({ value: '/w' }) as never)
+  on('fs.exists', ($, e) => ({ value: e.path in files || isDir(e.path) }))
+  on('fs.stat', ($, e) => ({ value: { kind: isDir(e.path) ? ('dir' as const) : ('file' as const), size: (files[e.path] ?? '').length, mtimeMs: 1, isLink: false } }))
+  on('fs.read', ($, e) => ({ value: files[e.path] ?? '' }))
+  on('fs.write', ($, e) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('fs.list', ($, e) => {
+    const names = new Set<string>()
+    for (const f of Object.keys(files)) if (f.startsWith(`${e.path}/`)) names.add(f.slice(e.path.length + 1).split('/')[0] as string)
+    return { value: [...names].map(name => ({ name, kind: isDir(`${e.path}/${name}`) ? ('dir' as const) : ('file' as const), size: 1, mtimeMs: 1, isLink: false })) } as never
+  })
+  on('process.run', ($, e) => {
+    const [cmd, , from, to] = (e as unknown as { argv: string[] }).argv
+    if (cmd === 'mv' && from !== undefined && to !== undefined) {
+      files[to] = files[from] ?? ''
+      delete files[from]
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  const store: Record<string, unknown> = {}
+  on('store.get', ($, e) => ({ value: store[e.key] }) as never)
+  on('store.set', ($, e) => {
+    store[e.key] = e.value
+    return { value: undefined } as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  return files
+}
+
+test('/client-mask-folder masks every text file under a folder on disk, TRM to SAP, and names no file', async ($, on) => {
+  const files = tree(on, { terms: [{ real: 'TRM', placeholder: 'SAP' }, { real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] })
+  files['/w/docs/plan.md'] = 'TRM go-live is in March.'
+  files['/w/docs/sub/notes.txt'] = 'TRM and SAP for Northwind Revenue'
+  files['/w/docs/plain.md'] = 'nothing listed'
+  files['/w/docs/.git/config'] = 'TRM'
+  files['/w/docs/data.bin'] = 'TRM\u0000'
+  const r = await $.command.run({ command: 'client-mask-folder', args: 'docs' } as never)
+  expect(files['/w/docs/plan.md']).toBe('SAP go-live is in March.')
+  expect(files['/w/docs/sub/notes.txt']).toBe('SAP and SAP for CLIENT_3')
+  expect(files['/w/docs/plain.md']).toBe('nothing listed')
+  expect(files['/w/docs/.git/config']).toBe('TRM')
+  expect(files['/w/docs/data.bin']).toBe('TRM\u0000')
+  expect(files[`${HOME}/${ORIGINALS}/w/docs/plan.md`]).toBe('TRM go-live is in March.')
+  const text = JSON.stringify(r)
+  expect(text).toContain('Masked 2 files')
+  expect(text).not.toContain('plan.md')
+  expect(text).not.toContain('Northwind')
+})
+
+test('/client-mask-folder refuses the home folder and Claude\'s own folder', async ($, on) => {
+  const files = tree(on, { terms: [{ real: 'TRM', placeholder: 'SAP' }] })
+  files[`${HOME}/a.md`] = 'TRM'
+  for (const args of ['~', '~/.claude', '']) {
+    await $.command.run({ command: 'client-mask-folder', args } as never)
+  }
+  expect(files[`${HOME}/a.md`]).toBe('TRM')
 })

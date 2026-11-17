@@ -46,6 +46,23 @@ export type Config = {
   // Start every session with masking on. Default false: masking is off until
   // you switch it on for a session from the band above the prompt.
   startOn?: boolean
+  // Refuse a Write that would replace a file whose listed names or personal
+  // data the new text no longer carries: Claude only ever saw them as
+  // placeholders, so a full rewrite would lose them for good. Default true.
+  guardOverwrites?: boolean
+  // Before Claude reads or edits a text file, mask the file itself on disk, so
+  // what Claude sees and what the file holds are the same and nothing ever
+  // needs turning back. Default false. With it on, "guardOverwrites" has no
+  // work to do and is skipped.
+  maskFilesInPlace?: boolean
+  // With "maskFilesInPlace", keep a copy of each file as it was before it was
+  // first masked, in the list's private folder, which Claude cannot open.
+  // Default true; false keeps no copy anywhere.
+  keepOriginals?: boolean
+  // Folders whose files are never rewritten on disk, even with
+  // "maskFilesInPlace" ("~/" allowed). What Claude reads from them is still
+  // masked on the way in, as without that option.
+  keepOnDisk?: string[]
   terms: Entry[]
 }
 
@@ -62,6 +79,7 @@ export const validate = (config: unknown): string[] => {
   const strings = (v: unknown) => Array.isArray(v) && v.every(s => typeof s === 'string')
   if (c.blockedFolders !== undefined && !strings(c.blockedFolders)) problems.push('the list\'s "blockedFolders" must be a list of folder paths')
   if (c.keep !== undefined && !strings(c.keep)) problems.push('the list\'s "keep" must be a list of values')
+  if (c.keepOnDisk !== undefined && !strings(c.keepOnDisk)) problems.push('the list\'s "keepOnDisk" must be a list of folder paths')
   if (c.keepAsIs !== undefined && !strings(c.keepAsIs)) problems.push('the list\'s "keepAsIs" must be a list of placeholders')
   if (c.detect !== undefined && (typeof c.detect !== 'object' || c.detect === null)) problems.push('the list\'s "detect" must be an object of true/false switches')
   const realTo = new Map<string, string>()
@@ -365,13 +383,25 @@ export const maskContent = (content: unknown, mask: (s: string) => string): unkn
 
 // A tool call's arguments as the model streams them, JSON text: masked value by
 // value when it parses (so the JSON stays valid), else as plain text.
+// Answers the JSON text exactly as given unless a string in it changed. The
+// API streams tool arguments with its own spacing and escapes; re-serialising
+// them, even to an equal value, makes the engine treat the call as rewritten
+// by a mod, and auto mode then refuses every tool call in that response.
 export const maskArgsJson = (json: string, mask: (s: string) => string): string => {
   if (json.trim() === '') return json
+  let parsed: unknown
   try {
-    return JSON.stringify(mapStrings(JSON.parse(json), mask))
+    parsed = JSON.parse(json)
   } catch {
     return mask(json)
   }
+  let changed = false
+  const out = mapStrings(parsed, s => {
+    const m = mask(s)
+    if (m !== s) changed = true
+    return m
+  })
+  return changed ? JSON.stringify(out) : json
 }
 
 // The text of a conversation the guard scans: everything but signed thinking,
@@ -409,3 +439,81 @@ export const toolMatches = (tool: string, patterns: string[]) =>
   patterns.some(p => (p.endsWith('*') ? tool.startsWith(p.slice(0, -1)) : tool === p))
 
 export const BINARY_FILE = /\.(pdf|png|jpe?g|gif|webp|heic|bmp|tiff?)$/i
+
+// The words of a shell command, quotes and escapes resolved, with each
+// separator (; & | < > ( ) and a newline) as a word of its own. Good enough to
+// find the files a command names; it does not expand variables or globs.
+export const shellWords = (command: string): string[] => {
+  const words: string[] = []
+  let cur = ''
+  let has = false
+  let quote: '"' | "'" | null = null
+  const end = () => {
+    if (has) words.push(cur)
+    cur = ''
+    has = false
+  }
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i] as string
+    if (quote) {
+      if (c === quote) quote = null
+      else if (c === '\\' && quote === '"' && i + 1 < command.length) cur += command[++i]
+      else cur += c
+      continue
+    }
+    if (c === '"' || c === "'") {
+      quote = c
+      has = true
+    } else if (c === '\\' && i + 1 < command.length) {
+      cur += command[++i]
+      has = true
+    } else if (/\s/.test(c)) {
+      end()
+      if (c === '\n') words.push(';')
+    } else if (';&|<>()'.includes(c)) {
+      end()
+      words.push(c)
+    } else {
+      cur += c
+      has = true
+    }
+  }
+  end()
+  return words
+}
+
+const SEPARATORS = new Set([';', '&', '|', '<', '>', '(', ')'])
+
+// Absolute paths of what a shell command names that could be a file: each word
+// that is not an option, a separator, a variable or a glob, resolved against
+// the folder the command starts in, following any "cd" in it. Capped at 50.
+export const commandPaths = (command: string, cwd: string, home: string): string[] => {
+  const out: string[] = []
+  let base = cwd
+  const resolve = (w: string) => {
+    const p = w === '~' ? home : w.startsWith('~/') ? `${home}${w.slice(1)}` : w
+    return p.startsWith('/') ? p : `${base}/${p}`
+  }
+  const words = shellWords(command)
+  for (let i = 0; i < words.length && out.length < 50; i++) {
+    const w = words[i] as string
+    if (w === '' || SEPARATORS.has(w) || w.startsWith('-') || /[$`*?[\]{}]/.test(w)) continue
+    if (w === 'cd') {
+      const dir = words[i + 1]
+      if (dir !== undefined && !SEPARATORS.has(dir) && !/[$`]/.test(dir)) base = resolve(dir).replace(/\/+$/, '') || '/'
+      i++
+      continue
+    }
+    if (w.includes('=') && !w.includes('/')) continue
+    const p = resolve(w)
+    if (!out.includes(p)) out.push(p)
+  }
+  return out
+}
+
+// Whether a path sits inside one of the folders ("~/" allowed) given.
+export const insideAny = (path: string, folders: string[], home: string): boolean =>
+  folders.some(f => {
+    const d = (f.startsWith('~/') ? `${home}${f.slice(1)}` : f).replace(/\/+$/, '')
+    return d !== '' && (path === d || path.startsWith(`${d}/`))
+  })
