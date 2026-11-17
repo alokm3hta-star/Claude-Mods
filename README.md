@@ -53,6 +53,10 @@ client-mask needs two steps beyond the install line, because some of its protect
 
 To check what the script would change without changing anything, add `--dry-run`.
 
+### A readable list
+
+The list accepts notes for you: lines starting with `//` (or `/* ... */`), and trailing commas. `/client-mask-tidy` rewrites it in a fixed layout: help on top, settings one per line, then the terms grouped (names, names kept out of files, one-way rules such as TRM to SAP, removed names, patterns) and aligned. Rows that share a placeholder stay together in their order, and your notes stay with the rows they sit by. It runs inside the mod with no model involved, writes only when the tidied list reads back with the same meaning, keeps the version before as `terms.json.before-tidy`, and replies with counts only.
+
 ### Masking one way only
 
 To never turn a placeholder back into the real value, in chat or in files, add these to your list next to `terms`:

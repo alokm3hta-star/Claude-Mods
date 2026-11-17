@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepResult } from 'claude-code'
 
-import { BINARY_FILE, Masker, REMOVED, commandPaths, mapStrings, onDiskAllowed, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, KEEP_AS_IS, Masker, REMOVED, commandPaths, mapStrings, onDiskAllowed, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
+import { parseList, sameMeaning, tidyList } from './listfile'
 import { scrubFile } from './scrub'
 import type { MaskStatus } from '../types'
 
@@ -12,6 +13,7 @@ const DIR = '.claude/client-mask'
 const VIEW = 'client-mask-view'
 const EDIT = 'client-mask-edit'
 const FOLDER = 'client-mask-folder'
+const TIDY = 'client-mask-tidy'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -159,10 +161,12 @@ const load = async ($: EngineInterface) => {
     loadedMtime = mtimeMs
     let parsed: unknown
     try {
-      parsed = JSON.parse(await $.fs.read(listPath))
-    } catch {
-      // The parser's message can quote the file, so it is not passed on.
-      throw new Error('the list is not valid JSON')
+      // Notes (// and /* */) and trailing commas are allowed in the list.
+      parsed = parseList(await $.fs.read(listPath)).value
+    } catch (err) {
+      // Only our own message, which gives a line number and never quotes the file.
+      const own = err instanceof Error && err.message.startsWith('the list') ? err.message : null
+      throw new Error(own ?? 'the list is not valid JSON')
     }
     const problems = validate(parsed)
     if (problems.length > 0) throw new Error(problems.join('; '))
@@ -183,11 +187,49 @@ const load = async ($: EngineInterface) => {
 const openList = async ($: EngineInterface) => {
   await ensure($)
   if (!(await $.fs.exists(listPath))) {
-    await $.fs.write(listPath, JSON.stringify(TEMPLATE, null, 2) + '\n')
+    await $.fs.write(listPath, tidyList(parseList(JSON.stringify(TEMPLATE)), TEMPLATE._how, KEEP_AS_IS).text)
     await $.process.run(['chmod', '600', listPath])
   }
   const { exitCode } = await $.process.run(['open', '-t', listPath])
   return exitCode === 0 ? 'Your masking list is open in your text editor. Save it and masking picks it up within 5 seconds.' : 'Could not open your text editor.'
+}
+
+// /client-mask-tidy: rewrites your list in a fixed, readable layout, here on
+// this computer; no model reads it. It writes only when the tidied list reads
+// back with exactly the same meaning, and keeps the version before beside it.
+// The answer gives counts only.
+export const tidyListFile = async ($: EngineInterface): Promise<string> => {
+  await ensure($)
+  if (!listPath || !(await $.fs.exists(listPath))) return 'You have no masking list yet: /client-mask-edit starts one.'
+  if (broken) return stopped()
+  const before = await $.fs.read(listPath)
+  let parsed: ReturnType<typeof parseList>
+  try {
+    parsed = parseList(before)
+  } catch {
+    return stopped()
+  }
+  const extra = ((parsed.value as Config).keepAsIs ?? []).map(s => s.trim().toUpperCase())
+  const { text, terms, groups } = tidyList(parsed, TEMPLATE._how, new Set([...KEEP_AS_IS, ...extra]))
+  let check: unknown
+  try {
+    check = parseList(text).value
+  } catch {
+    check = null
+  }
+  if (check === null || validate(check).length > 0 || !sameMeaning(parsed.value, check)) {
+    return 'client-mask: the tidied list did not read back with the same meaning, so your list was left exactly as it was.'
+  }
+  if (text === before) return 'Your masking list is already tidy.'
+  const backup = `${listPath}.before-tidy`
+  await $.fs.write(backup, before)
+  await $.process.run(['chmod', '600', backup])
+  const tmp = `${listPath}.tidy-tmp`
+  await $.fs.write(tmp, text)
+  await $.process.run(['chmod', '600', tmp])
+  const { exitCode } = await $.process.run(['mv', '-f', tmp, listPath])
+  if (exitCode !== 0) return 'client-mask: the tidied list could not be saved, so your list was left as it was.'
+  return `Tidied your masking list: ${terms} terms in ${groups} groups, your notes kept. The version before is saved beside it as terms.json.before-tidy.`
 }
 
 const stopped = () =>
@@ -434,6 +476,7 @@ export const register: Register = on => {
     $.clock.every(5000, () => void ensure($))
     await $.command.register({ name: VIEW, description: 'Show which placeholder stands for which client term (on screen only)' })
     await $.command.register({ name: EDIT, description: 'Open your masking list in your text editor (Claude never sees it)' })
+    await $.command.register({ name: TIDY, description: 'Rewrite your masking list in a tidy, readable layout, locally (Claude never sees it)' })
     await $.command.register({ name: FOLDER, description: 'Mask every text file under a folder on disk by your list, locally; no model is involved' })
     // Catches conversations that closed without cleaning up (a crash, a forced
     // quit): recent ones, idle long enough that no session still writes them.
@@ -646,6 +689,8 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: EDIT }, async $ => ({ text: await openList($) }))
+
+  on('command.run', { command: TIDY }, async $ => ({ text: await tidyListFile($) }))
 
   on('command.run', { command: FOLDER }, async ($, e) => ({ text: await maskFolder($, e.args) }))
 

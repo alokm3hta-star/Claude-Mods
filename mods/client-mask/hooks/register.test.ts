@@ -745,3 +745,19 @@ test('/client-mask-folder refuses a folder outside maskOnDiskIn and masks one in
   expect(files['/w/wiki/pages/fica.md']).toBe('TRM/PSCD')
   expect(files['/w/Review/a.md']).toBe('SAP review')
 })
+
+test('/client-mask-tidy rewrites the list readably, keeps the version before, and names nothing', async ($, on) => {
+  const files = tree(on, { terms: [] })
+  const messy = '{"startOn":false,"terms":[{"placeholder":"CLIENT_3","real":"Northwind Revenue"}, // main client\n{"real":"TRM","placeholder":"SAP"},]}'
+  files[LIST_PATH] = messy
+  const r = JSON.stringify(await $.command.run({ command: 'client-mask-tidy', args: '' } as never))
+  expect(r).toContain('Tidied your masking list: 2 terms')
+  expect(r).not.toContain('Northwind')
+  expect(files[`${LIST_PATH}.before-tidy`]).toBe(messy)
+  const tidied = files[LIST_PATH] ?? ''
+  expect(tidied).toContain('// main client')
+  expect(tidied).toContain('{ "real": "Northwind Revenue", "placeholder": "CLIENT_3" }')
+  // The tidied list is read by the mod as before: the name is still masked.
+  const again = JSON.stringify(await $.command.run({ command: 'client-mask-tidy', args: '' } as never))
+  expect(again).toContain('already tidy')
+})
