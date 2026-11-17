@@ -761,3 +761,14 @@ test('/client-mask-tidy rewrites the list readably, keeps the version before, an
   const again = JSON.stringify(await $.command.run({ command: 'client-mask-tidy', args: '' } as never))
   expect(again).toContain('already tidy')
 })
+
+test('/client-mask-tidy leaves a tidy list and its saved copy alone, whatever its line endings', async ($, on) => {
+  const files = tree(on, { terms: [] })
+  files[LIST_PATH] = '{"terms":[{"real":"TRM","placeholder":"SAP"}]}'
+  await $.command.run({ command: 'client-mask-tidy', args: '' } as never)
+  const original = files[`${LIST_PATH}.before-tidy`]
+  files[LIST_PATH] = (files[LIST_PATH] ?? '').replace(/\n/g, '\r\n').replace(/\s+$/, '')
+  const r = JSON.stringify(await $.command.run({ command: 'client-mask-tidy', args: '' } as never))
+  expect(r).toContain('already tidy')
+  expect(files[`${LIST_PATH}.before-tidy`]).toBe(original)
+})

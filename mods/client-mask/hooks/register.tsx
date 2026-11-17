@@ -220,7 +220,10 @@ export const tidyListFile = async ($: EngineInterface): Promise<string> => {
   if (check === null || validate(check).length > 0 || !sameMeaning(parsed.value, check)) {
     return 'client-mask: the tidied list did not read back with the same meaning, so your list was left exactly as it was.'
   }
-  if (text === before) return 'Your masking list is already tidy.'
+  // Line endings and trailing blank space do not count: a list already tidy is
+  // left alone, and so is the copy of the version before it.
+  const plain = (s: string) => s.replace(/^﻿/, '').replace(/\r\n?/g, '\n').replace(/\s+$/, '')
+  if (plain(text) === plain(before)) return 'Your masking list is already tidy.'
   const backup = `${listPath}.before-tidy`
   await $.fs.write(backup, before)
   await $.process.run(['chmod', '600', backup])
