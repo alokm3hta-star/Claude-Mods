@@ -63,7 +63,7 @@ To never turn a placeholder back into the real value, in chat or in files, add t
 "maskFilesInPlace": true
 ```
 
-With `maskFilesInPlace`, each text file is masked on disk before Claude reads, edits or greps it, or runs a command that names it. What Claude sees then matches the file, and auto mode sees no rewritten call. A copy of each original is kept in an `originals` folder beside your list, which Claude cannot open; `"keepOriginals": false` keeps none. Folders listed in `"keepOnDisk"` are never rewritten; what Claude reads from them is still masked on the way in.
+With `maskFilesInPlace`, each text file is masked on disk before Claude reads, edits or greps it, or runs a command that names it. What Claude sees then matches the file, and auto mode sees no rewritten call. A copy of each original is kept in an `originals` folder beside your list, which Claude cannot open; `"keepOriginals": false` keeps none. Folders listed in `"keepOnDisk"` are never rewritten; what Claude reads from them is still masked on the way in. To rewrite only certain folders, list them in `"maskOnDiskIn"`: nothing outside them is ever changed on disk, and a full rewrite of a file there that holds real names is still refused.
 
 `/client-mask-folder <folder>` masks every text file under a folder on disk at once, inside the mod, with no model involved. It skips hidden folders such as `.git`, `node_modules`, links, files that are not text and files over 5 MB, and its reply gives counts only.
 

@@ -63,6 +63,11 @@ export type Config = {
   // "maskFilesInPlace" ("~/" allowed). What Claude reads from them is still
   // masked on the way in, as without that option.
   keepOnDisk?: string[]
+  // When set, files are rewritten on disk ("maskFilesInPlace" and
+  // /client-mask-folder) only inside these folders ("~/" allowed); everything
+  // else is never rewritten, and what Claude reads from it is still masked on
+  // the way in. "keepOnDisk" still wins inside them.
+  maskOnDiskIn?: string[]
   terms: Entry[]
 }
 
@@ -80,6 +85,7 @@ export const validate = (config: unknown): string[] => {
   if (c.blockedFolders !== undefined && !strings(c.blockedFolders)) problems.push('the list\'s "blockedFolders" must be a list of folder paths')
   if (c.keep !== undefined && !strings(c.keep)) problems.push('the list\'s "keep" must be a list of values')
   if (c.keepOnDisk !== undefined && !strings(c.keepOnDisk)) problems.push('the list\'s "keepOnDisk" must be a list of folder paths')
+  if (c.maskOnDiskIn !== undefined && !strings(c.maskOnDiskIn)) problems.push('the list\'s "maskOnDiskIn" must be a list of folder paths')
   if (c.keepAsIs !== undefined && !strings(c.keepAsIs)) problems.push('the list\'s "keepAsIs" must be a list of placeholders')
   if (c.detect !== undefined && (typeof c.detect !== 'object' || c.detect === null)) problems.push('the list\'s "detect" must be an object of true/false switches')
   const realTo = new Map<string, string>()
@@ -512,8 +518,17 @@ export const commandPaths = (command: string, cwd: string, home: string): string
 }
 
 // Whether a path sits inside one of the folders ("~/" allowed) given.
-export const insideAny = (path: string, folders: string[], home: string): boolean =>
-  folders.some(f => {
-    const d = (f.startsWith('~/') ? `${home}${f.slice(1)}` : f).replace(/\/+$/, '')
-    return d !== '' && (path === d || path.startsWith(`${d}/`))
+export const insideAny = (path: string, folders: string[], home: string): boolean => {
+  // macOS folders ignore case ("review" and "Review" are one folder), so do we.
+  const p = path.toLowerCase()
+  return folders.some(f => {
+    const d = (f.startsWith('~/') ? `${home}${f.slice(1)}` : f).replace(/\/+$/, '').toLowerCase()
+    return d !== '' && (p === d || p.startsWith(`${d}/`))
   })
+}
+
+// Whether a file may be rewritten on disk: inside "maskOnDiskIn" when that is
+// set, and never inside "keepOnDisk".
+export const onDiskAllowed = (path: string, config: Pick<Config, 'maskOnDiskIn' | 'keepOnDisk'>, home: string): boolean =>
+  (config.maskOnDiskIn === undefined || insideAny(path, config.maskOnDiskIn, home)) && !insideAny(path, config.keepOnDisk ?? [], home)
+

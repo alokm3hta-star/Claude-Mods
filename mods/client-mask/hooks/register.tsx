@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepResult } from 'claude-code'
 
-import { BINARY_FILE, Masker, REMOVED, commandPaths, insideAny, mapStrings, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, Masker, REMOVED, commandPaths, mapStrings, onDiskAllowed, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
 import { scrubFile } from './scrub'
 import type { MaskStatus } from '../types'
@@ -31,7 +31,7 @@ const TEMPLATE = {
     'a full rewrite of a file that holds real names is then refused, unless "guardOverwrites": false. ' +
     'Or set "maskFilesInPlace": true to mask each text file on disk before Claude reads, edits, greps or runs a command on it ' +
     '(a copy of the original is kept where Claude cannot open it; "keepOriginals": false keeps none; ' +
-    'folders in "keepOnDisk" are never rewritten). /client-mask-folder <folder> masks a whole folder on disk at once, with no model involved.',
+    'only folders in "maskOnDiskIn", when set, are rewritten, and never those in "keepOnDisk"). /client-mask-folder <folder> masks a whole folder on disk at once, with no model involved.',
   detect: {},
   keep: [],
   blockedFolders: [],
@@ -403,10 +403,13 @@ export const maskFolder = async ($: EngineInterface, args: string): Promise<stri
   if (!(await $.fs.exists(root))) return 'client-mask: that folder does not exist, so nothing was changed.'
   const { kind } = await $.fs.stat(root)
   const files = kind === 'dir' ? await filesUnder($, root) : [root]
-  const keep = config?.keepOnDisk ?? []
+  const scope = { maskOnDiskIn: config?.maskOnDiskIn, keepOnDisk: config?.keepOnDisk }
+  if (config?.maskOnDiskIn !== undefined && !files.some(f => onDiskAllowed(f, scope, home))) {
+    return 'client-mask: that folder is outside the folders your list allows to be masked on disk ("maskOnDiskIn"), so nothing was changed.'
+  }
   const n = { masked: 0, unchanged: 0, skipped: 0, failed: 0 }
   for (const f of files) {
-    if (insideAny(f, keep, home)) {
+    if (!onDiskAllowed(f, scope, home)) {
       n.skipped++
       continue
     }
@@ -415,7 +418,7 @@ export const maskFolder = async ($: EngineInterface, args: string): Promise<stri
   const plural = (k: number, one: string) => `${k} ${one}${k === 1 ? '' : 's'}`
   return (
     `Masked ${plural(n.masked, 'file')} on disk; ${n.unchanged} had nothing to mask; ` +
-    `${n.skipped} left as they were (not text, over 5 MB, or in a keepOnDisk folder)` +
+    `${n.skipped} left as they were (not text, over 5 MB, or outside the folders your list allows)` +
     (n.failed > 0 ? `; ${n.failed} could not be written` : '') +
     (files.length >= FOLDER_MAX_FILES ? `; stopped at ${FOLDER_MAX_FILES} files` : '') +
     (n.masked > 0 && config?.keepOriginals !== false ? ". A copy of each original is in your list's private folder." : '.')
@@ -566,15 +569,17 @@ export const register: Register = on => {
         : tool === 'Grep' && typeof (e as { path?: unknown }).path === 'string' ? [(e as { path: string }).path]
         : tool === 'Bash' ? commandPaths(String((e as { command?: unknown }).command ?? ''), await $.session.cwd(), home)
         : []
-      const keep = config.keepOnDisk ?? []
       for (const target of targets) {
-        if (target === '' || insideAny(target, keep, home)) continue
+        if (target === '' || !onDiskAllowed(target, config, home)) continue
         if ((await maskFileInPlace($, masker, target, config.keepOriginals !== false)) === 'failed') {
           return { deny: 'client-mask: a file this call touches could not be masked on disk first, so the call was stopped. Check it is a text file you can write to.' }
         }
       }
     }
-    if (tool === 'Write' && path !== '' && config.guardOverwrites !== false && config.maskFilesInPlace !== true) {
+    // Where files are masked on disk the guard has nothing to protect; elsewhere
+    // (the folders your list keeps as they are) it still stops a full rewrite.
+    const maskedOnDisk = config.maskFilesInPlace === true && onDiskAllowed(path, config, home)
+    if (tool === 'Write' && path !== '' && config.guardOverwrites !== false && !maskedOnDisk) {
       const lost = await overwriteLoses($, masker, path, String((e as { content?: unknown }).content ?? ''), restores)
       if (lost !== null) {
         return {

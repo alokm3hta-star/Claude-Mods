@@ -702,3 +702,46 @@ test('/client-mask-folder refuses the home folder and Claude\'s own folder', asy
   }
   expect(files[`${HOME}/a.md`]).toBe('TRM')
 })
+
+// "maskOnDiskIn": only the folders named there are ever rewritten on disk.
+test('with maskOnDiskIn, only files in those folders are masked on disk; wiki pages never are', async ($, on) => {
+  const files = inPlace(on, { maskOnDiskIn: ['/w/Review'], terms: [...LIST.terms, { real: 'TRM', placeholder: 'SAP' }] })
+  on('session.cwd', () => ({ value: '/w' }) as never)
+  files['/w/Review/plan.md'] = 'TRM go-live'
+  files['/w/review/70 Tooling /sdd.md'] = 'TRM tooling'
+  files['/w/wiki/pages/fica.md'] = 'TRM/PSCD in FI-CA'
+  on('tool.call', () => ({ result: { content: 'ok' } }) as never)
+  await $.tool.call({ tool: 'Read', file_path: '/w/Review/plan.md' } as never)
+  await $.tool.call({ tool: 'Read', file_path: '/w/review/70 Tooling /sdd.md' } as never)
+  await $.tool.call({ tool: 'Read', file_path: '/w/wiki/pages/fica.md' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'grep -n SAP wiki/pages/fica.md' } as never)
+  expect(files['/w/Review/plan.md']).toBe('SAP go-live')
+  expect(files['/w/review/70 Tooling /sdd.md']).toBe('SAP tooling')
+  expect(files['/w/wiki/pages/fica.md']).toBe('TRM/PSCD in FI-CA')
+})
+
+test('with maskOnDiskIn, a full rewrite of a wiki page that holds real names is still refused', async ($, on) => {
+  const files = inPlace(on, { maskOnDiskIn: ['/w/Review'] })
+  files['/w/wiki/pages/client.md'] = 'Prepared for Northwind Revenue.'
+  let ran = false
+  on('tool.call', () => {
+    ran = true
+    return { result: { content: 'ok' } } as never
+  })
+  const r = await $.tool.call({ tool: 'Write', file_path: '/w/wiki/pages/client.md', content: 'Prepared for CLIENT_3.' } as never)
+  expect(ran).toBe(false)
+  expect(JSON.stringify(r)).toContain('CLIENT_3')
+  expect(files['/w/wiki/pages/client.md']).toBe('Prepared for Northwind Revenue.')
+})
+
+test('/client-mask-folder refuses a folder outside maskOnDiskIn and masks one inside it', async ($, on) => {
+  const files = tree(on, { maskOnDiskIn: ['/w/Review'], terms: [{ real: 'TRM', placeholder: 'SAP' }] })
+  files['/w/wiki/pages/fica.md'] = 'TRM/PSCD'
+  files['/w/Review/a.md'] = 'TRM review'
+  const out = JSON.stringify(await $.command.run({ command: 'client-mask-folder', args: 'wiki' } as never))
+  expect(out).toContain('outside the folders')
+  expect(files['/w/wiki/pages/fica.md']).toBe('TRM/PSCD')
+  await $.command.run({ command: 'client-mask-folder', args: '/w' } as never)
+  expect(files['/w/wiki/pages/fica.md']).toBe('TRM/PSCD')
+  expect(files['/w/Review/a.md']).toBe('SAP review')
+})
