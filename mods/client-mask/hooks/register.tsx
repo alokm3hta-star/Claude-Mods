@@ -18,7 +18,7 @@ const EDIT = 'client-mask-edit'
 const FOLDER = 'client-mask-folder'
 const TIDY = 'client-mask-tidy'
 const MODEL = 'client-mask-model'
-const VERSION = '0.18.0'
+const VERSION = '0.18.1'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -281,9 +281,57 @@ const markSession = async ($: EngineInterface) => {
 
 // Loads the list, and reloads it when it changes (checked at most every 5s).
 // Never throws: a list it cannot read stops sending rather than sending unmasked.
+// Your press on the band, per session, kept in the store as well as in the
+// session's state: the session's state can come back empty (a plugin having the
+// context re-read), and masking you switched on must not quietly go back off.
+// A session with no press still starts as your list says (off unless "startOn").
+const CHOICE_KEY = 'maskChoices'
+const choices = async ($: EngineInterface): Promise<Record<string, { paused: boolean; at: number }>> => {
+  const v = await $.store.get(CHOICE_KEY).catch(() => undefined)
+  return v && typeof v === 'object' ? (v as Record<string, { paused: boolean; at: number }>) : {}
+}
+// The session's id as the mod's own check last saw it; asked again only before that.
+const sessionId = async ($: EngineInterface) => markedSession || (await $.session.id())
+export const rememberChoice = async ($: EngineInterface, isPaused: boolean) => {
+  try {
+    const id = await sessionId($)
+    const now = await $.clock.now()
+    const kept = Object.fromEntries(Object.entries(await choices($)).filter(([, c]) => now - c.at < RECENT_MS))
+    await $.store.set(CHOICE_KEY, { ...kept, [id]: { paused: isPaused, at: now } })
+  } catch {
+    // The session's own state still holds the press.
+  }
+}
+const pausedChoice = async ($: EngineInterface): Promise<boolean | null> => {
+  const own = await read($, pausedAtom)
+  // An emptied state reads back as undefined, not null: only a real press counts.
+  if (typeof own === 'boolean') return own
+  try {
+    const c = (await choices($))[await sessionId($)]
+    if (!c) return null
+    // Put the press back into the session's state, so the band reads it too.
+    await update($, pausedAtom, () => c.paused)
+    return c.paused
+  } catch {
+    return null
+  }
+}
+
+// Whether masking was on at the last check, to tell you if it goes off with no press.
+let wasOn = false
+let pressedOff = false
+
 const ensure = async ($: EngineInterface) => {
   await load($)
-  paused = (await read($, pausedAtom)) ?? config?.startOn !== true
+  paused = (await pausedChoice($)) ?? config?.startOn !== true
+  const on = isOn()
+  if (wasOn && !on && paused && !pressedOff) {
+    $.ui.toast('⚠ client-mask: masking went off in this session without a press on the band. Switch it back on before you send anything.', {
+      timeoutMs: 15000,
+    })
+  }
+  wasOn = on
+  pressedOff = false
   if (isOn()) await rememberMasked($)
   try {
     await markSession($)
@@ -1047,6 +1095,8 @@ export const register: Register = on => {
       if (paused) {
         paused = false
         await update($, pausedAtom, () => false)
+        await rememberChoice($, false)
+        wasOn = isOn()
         if (isOn()) await rememberMasked($)
         $.ui.toast(
           'Masking is on for this session only: what you send from now on is masked. Other sessions are not affected.',
@@ -1054,7 +1104,10 @@ export const register: Register = on => {
         )
       } else {
         paused = true
+        pressedOff = true
+        wasOn = false
         await update($, pausedAtom, () => true)
+        await rememberChoice($, true)
         $.ui.toast(
           'Masking is off for this session: what you send now reaches Claude as written. ' +
             'Switch it back on at any time: what you send from then on is masked, while what Claude already read stays in this conversation.',

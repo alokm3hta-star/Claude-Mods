@@ -181,3 +181,11 @@ Claude's own commands and edits. Changes: tool-call arguments are masked by the 
 back still goes through the model); the model's SECRET kind is off by default (the detectors find secrets precisely);
 model IDs and user names inside a file path, and hex machine IDs, are left alone (all-digit IDs are still masked);
 words of the home and project folder paths are allowed. 97 tests pass.
+
+## 11. 0.18.1: masking you switch on stays on (2026-11-24)
+
+Sessions still start with masking off; you switch it on from the band. Your press is now kept per session in the
+store as well as in the session's state, so when the session's state comes back empty (a plugin having the context
+re-read) masking stays as you set it, instead of falling back to off. If masking ever goes off without a press on the
+band, a toast says so at once. Also in 0.18.1: git short hashes count as machine IDs; the wiki's agent names are
+allowed words (owner's decision). 103 tests pass.

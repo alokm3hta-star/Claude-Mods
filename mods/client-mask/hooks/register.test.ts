@@ -795,3 +795,88 @@ test('with the model switched off in the list, the list and detectors still mask
   const { chunks } = await runStep($)
   expect(chunks.filter(c => c.kind === 'input').map(c => c.json).join('')).toBe('{"prompt":"brief for CLIENT_3"}')
 })
+
+test('masking you switched on stays on when the session state comes back empty', async ($, on) => {
+  disk(on, JSON.stringify({ model: { enabled: false }, terms: [{ real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] }))
+  // The test kit has no session id of its own; a real session always has one.
+  on('session.id', () => ({ value: 'session-1' }) as never)
+  let emptied = false
+  // Once, as a context re-read would: the press is gone from the session's state, its version stays.
+  on('state.get', async ($, e, next) => {
+    const r = await next(e)
+    if (!emptied || (e as { key?: string }).key !== 'paused') return r
+    emptied = false
+    const held = (r as { value: { value: unknown; version: number } }).value
+    return { ...r, value: { ...held, value: undefined } } as never
+  })
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(JSON.stringify(e))
+    return { value: undefined } as never
+  })
+  let seen = ''
+  on('tool.call', ($, e) => {
+    seen = JSON.stringify(e)
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/x/warm-up.md' } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  await ui.press({ key: 'mask' })
+  expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeDefined()
+  // The session's own state for the press comes back empty from now on.
+  emptied = true
+  const r = await $.tool.call({ tool: 'Write', file_path: '/x/CLIENT_3.md', content: 'hi' } as never)
+  // Still on: a local tool gets the real name back.
+  expect(JSON.stringify(r) + seen).toContain('/x/Northwind Revenue.md')
+  expect(toasts.join()).not.toContain('without a press')
+  await ui.unmount()
+})
+
+test('a new session with no press on the band still starts with masking off', async ($, on) => {
+  disk(on, JSON.stringify({ model: { enabled: false }, terms: [{ real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] }))
+  on('ui.status', () => ({ value: undefined }) as never)
+  let seen = ''
+  on('tool.call', ($, e) => {
+    seen = JSON.stringify(e)
+    return { result: { content: 'ok' } } as never
+  })
+  await $.tool.call({ tool: 'WebSearch', query: 'Northwind Revenue tax rules' } as never)
+  expect(seen).toContain('Northwind Revenue tax rules')
+})
+
+test('if masking goes off without a press on the band, you are told at once', async ($, on) => {
+  disk(on, JSON.stringify({ model: { enabled: false }, terms: [{ real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] }))
+  on('session.id', () => ({ value: 'session-2' }) as never)
+  let flipped = false
+  on('state.get', async ($, e, next) => {
+    const r = await next(e)
+    if (!flipped || (e as { key?: string }).key !== 'paused') return r
+    const held = (r as { value: { value: unknown; version: number } }).value
+    return { ...r, value: { ...held, value: true } } as never
+  })
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => {
+    toasts.push(JSON.stringify(e))
+    return { value: undefined } as never
+  })
+  on('tool.call', () => ({ result: { content: 'ok' } }) as never)
+  await $.tool.call({ tool: 'Read', file_path: '/x/warm-up.md' } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  await ui.press({ key: 'mask' })
+  await $.tool.call({ tool: 'Read', file_path: '/x/a.md' } as never)
+  expect(toasts.join()).not.toContain('without a press')
+  flipped = true
+  await $.tool.call({ tool: 'Read', file_path: '/x/b.md' } as never)
+  expect(toasts.join()).toContain('without a press')
+  await ui.unmount()
+})
