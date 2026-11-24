@@ -189,3 +189,14 @@ store as well as in the session's state, so when the session's state comes back 
 re-read) masking stays as you set it, instead of falling back to off. If masking ever goes off without a press on the
 band, a toast says so at once. Also in 0.18.1: git short hashes count as machine IDs; the wiki's agent names are
 allowed words (owner's decision). 103 tests pass.
+
+## 12. 0.18.2: the band never goes silent (2026-11-24)
+
+The band could lag a press by seconds: the in-process model held the mod's one worker for a whole scan (its
+"turn between windows" was a resolved promise, which runs before any queued press or redraw), and the press waited
+on store writes before redrawing. Now the engine hands the worker back between 256-token windows through a `$` call
+(`$.clock.sleep(1)`), so a press and its redraw run mid-scan; a press shows "⏳ Switching masking on/off…" at once,
+then settles; while the model loads, the band shows "⏳ Masking starting" with the step (reading the model files,
+checking them, starting the model) and "nothing is sent until the lock shows"; the 🔒 shows only once the model is
+ready; while a scan runs, the lock row reads "scanning…". 105 tests pass. Not yet checked live: how long a press
+takes mid-scan, and whether the pauses slow a long scan (each is one host round trip per 256 tokens).

@@ -18,20 +18,26 @@ const LIST = {
 }
 
 // A list on a pretend disk, answered beneath the plugin.
-const disk = (on: On, text = JSON.stringify(LIST)) => {
+// `hold` lets a test hold a read or a store write open, as a slow disk would.
+type Hold = { exists?: (path: string) => boolean; read?: (path: string) => Promise<void>; storeSet?: (key: string) => Promise<void> }
+const disk = (on: On, text = JSON.stringify(LIST), hold: Hold = {}) => {
   const files: Record<string, string> = { [LIST_PATH]: text }
   mock.env(on, { HOME })
   mock.clock(on)
-  on('fs.exists', ($, e) => ({ value: e.path in files || Object.keys(files).some(f => f.startsWith(`${e.path}/`)) }))
+  on('fs.exists', ($, e) => ({ value: hold.exists?.(e.path) === true || e.path in files || Object.keys(files).some(f => f.startsWith(`${e.path}/`)) }))
   on('fs.stat', () => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 1, isLink: false } }))
-  on('fs.read', ($, e) => ({ value: files[e.path] ?? '' }))
+  on('fs.read', async ($, e) => {
+    await hold.read?.(e.path)
+    return { value: files[e.path] ?? '' }
+  })
   on('fs.write', ($, e) => {
     files[e.path] = e.text
     return { value: undefined }
   })
   const store: Record<string, unknown> = {}
   on('store.get', ($, e) => ({ value: store[e.key] }) as never)
-  on('store.set', ($, e) => {
+  on('store.set', async ($, e) => {
+    await hold.storeSet?.(e.key)
     store[e.key] = e.value
     return { value: undefined } as never
   })
@@ -878,5 +884,78 @@ test('if masking goes off without a press on the band, you are told at once', as
   flipped = true
   await $.tool.call({ tool: 'Read', file_path: '/x/b.md' } as never)
   expect(toasts.join()).toContain('without a press')
+  await ui.unmount()
+})
+
+// Polls the drawing until `q` is drawn, for states that last only while
+// something beneath is held.
+const drawnSoon = async (ui: { find: (q: never) => Promise<unknown> }, q: object) => {
+  for (let i = 0; i < 100; i++) {
+    const f = await ui.find(q as never)
+    if (f) return f
+    await new Promise(r => setTimeout(r, 5))
+  }
+  return undefined
+}
+
+test('a press on the band shows at once that it landed, before the press is kept', async ($, on) => {
+  let release = () => {}
+  const gate = new Promise<void>(r => (release = r))
+  let holding = false
+  // Keeping the press waits here, as a slow store would.
+  disk(on, JSON.stringify({ startOn: true, model: { enabled: false }, terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }] }), {
+    storeSet: async key => {
+      if (key !== 'maskChoices') return
+      holding = true
+      await gate
+    },
+  })
+  // The test kit has no session id of its own; a real session always has one.
+  on('session.id', () => ({ value: 'session-3' }) as never)
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  await $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeDefined()
+  const pressed = ui.press({ key: 'mask' })
+  expect(await drawnSoon(ui, { type: 'Text', text: /Switching masking off/ })).toBeDefined()
+  expect(holding).toBe(true)
+  release()
+  await pressed
+  expect(await ui.find({ type: 'Button', text: '⚠ Masking off' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '⏳ Switching masking off…' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('while the model loads the band says what it is doing, and the lock shows only once it is ready', async ($, on) => {
+  const folder = `${HOME}/.claude/client-mask-models/medium-`
+  let release = () => {}
+  const gate = new Promise<void>(r => (release = r))
+  // Reading the model's files waits here, as a large file does.
+  disk(on, JSON.stringify({ startOn: true, terms: [] }), {
+    exists: path => path.startsWith(folder),
+    read: async path => {
+      if (path.startsWith(folder)) await gate
+    },
+  })
+  on('ui.render', ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, {}) as never
+  })
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  void $.tool.call({ tool: 'WebSearch', query: 'warm-up' } as never).catch(() => undefined)
+  const ui = await $.ui.mount({ plugin: 'client-mask', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 120 } as never })
+  expect(await drawnSoon(ui, { type: 'Button', text: '⏳ Masking starting' })).toBeDefined()
+  expect(await drawnSoon(ui, { type: 'Text', text: /reading the model files/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeUndefined()
+  // The pretend files fail their checksum: the band says the model is not running, never the lock.
+  release()
+  expect(await drawnSoon(ui, { type: 'Text', text: /Masking model is not running/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeUndefined()
   await ui.unmount()
 })

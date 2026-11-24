@@ -179,7 +179,17 @@ export class ModelUnavailable extends Error {
 
 // Reads, checks and compiles the model. Throws ModelUnavailable with a reason
 // that names no text, only what is wrong with the files.
-export async function loadFinder($: EngineInterface, home: string, cfg: ModelConfig): Promise<SpanFinder> {
+export type LoadSteps = {
+  // Runs between the model's windows and between load steps (see createEngine).
+  pause?: () => Promise<void>
+  // What the load is doing, for the band: 'reading', 'checking', 'starting'.
+  onStep?: (step: LoadStep) => void
+}
+export type LoadStep = 'reading' | 'checking' | 'starting'
+
+export async function loadFinder($: EngineInterface, home: string, cfg: ModelConfig, steps: LoadSteps = {}): Promise<SpanFinder> {
+  const pause = steps.pause ?? (() => Promise.resolve())
+  const step = (s: LoadStep) => steps.onStep?.(s)
   const size = cfg.size ?? DEFAULTS.size
   const folder = modelFolder(home, size)
   const names = modelFiles(size)
@@ -192,16 +202,21 @@ export async function loadFinder($: EngineInterface, home: string, cfg: ModelCon
   const bytes: Uint8Array[] = []
   for (const f of files) {
     if (!(await $.fs.exists(f.path))) throw new ModelUnavailable(`the ${size} masking model is not installed (/client-mask-model shows how)`)
+    step('reading')
     const b = await readBytes($, f.path)
+    step('checking')
     if (b.length !== f.info.bytes || hex(await crypto.subtle.digest('SHA-256', b)) !== f.info.sha256) {
       throw new ModelUnavailable(`a ${size} masking model file does not match its published checksum, so it was not used`)
     }
     bytes.push(b)
   }
   try {
+    step('starting')
+    await pause()
     const tokenizer = new Tokenizer(JSON.parse(new TextDecoder().decode(bytes[1])) as WebTokenizerFile)
+    await pause()
     const module = await $.wasm.compile('./pii/pii-simd.wasm')
-    const engine = createEngine(module, bytes[0] as Uint8Array, TAGS.length)
+    const engine = createEngine(module, bytes[0] as Uint8Array, TAGS.length, steps.pause)
     return createDetector(tokenizer, engine, { labels: cfg.labels ?? DEFAULT_LABELS, sensitivity: cfg.sensitivity ?? DEFAULTS.sensitivity })
   } catch {
     throw new ModelUnavailable('the masking model could not be started')

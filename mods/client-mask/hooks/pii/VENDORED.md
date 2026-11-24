@@ -9,7 +9,7 @@ Source: https://github.com/newmean-ai/pii at commit `4b63a4c` (npm `@newmean-ai/
 | `tokenizer.ts`, `decode.ts`, `table.ts`, `word_tables.ts`, `emoji.ts`, `pictographic.ts`, `models.ts`, `types.ts` | `js/src/` | import paths without `.js` (the mod loader's form); nothing else |
 | `onnx-weights.ts` | `js/src/engines/` | as above |
 | `pii-simd.wasm` | `js/src/engines/wasm-simd.ts` | the embedded base64 written out as the binary it holds (SHA-256 `eaeaac20…59fd`, no imports) |
-| `engine.ts` | `js/src/engines/builtin.ts` | new: compiled by the caller (`$.wasm.compile`), a deadline checked before each 256-token window, no relaxed-SIMD build, no dynamic import |
+| `engine.ts` | `js/src/engines/builtin.ts` | new: compiled by the caller (`$.wasm.compile`), a deadline checked before each 256-token window, an optional `pause` between windows (in the mod runtime a `$` call, so the band answers mid-scan), no relaxed-SIMD build, no dynamic import |
 | `detector.ts` | `js/src/redactor.ts` | new: detect only (model, emoji handling, whole words, grapheme snapping); no regex layer, table mode, user lists, onnxruntime or download |
 | `helper.mjs` | new | runs the same files in a local Node process for texts too long for a hook's 10 s budget; stdin in, stdout out, no network, no writes |
 

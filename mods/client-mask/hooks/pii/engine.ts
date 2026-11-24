@@ -25,7 +25,9 @@ export interface Engine {
   run(windows: { ids: number[] }[], deadline: number): Promise<Float32Array[]>
 }
 
-export function createEngine(module: WebAssembly.Module, model: Uint8Array, nTags: number): Engine {
+// `pause`, when given, runs between windows: in the mod runtime a `$` call, which hands the worker back so a press
+// on the band and its redraw run mid-scan (a resolved promise does not: it runs before anything queued).
+export function createEngine(module: WebAssembly.Module, model: Uint8Array, nTags: number, pause?: () => Promise<void>): Engine {
   const instance = new WebAssembly.Instance(module, {})
   const ex = instance.exports as unknown as Exports
   const weights = onnxToPiiw(model)
@@ -49,7 +51,7 @@ export function createEngine(module: WebAssembly.Module, model: Uint8Array, nTag
         if (!o) throw new Error('engine: out of memory')
         out.push(new Float32Array(ex.memory.buffer, o, L * nTags).slice())
         // Give the rest of the mod a turn between windows.
-        await Promise.resolve()
+        await (pause ? pause() : Promise.resolve())
       }
       return out
     },

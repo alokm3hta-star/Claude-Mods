@@ -4,7 +4,7 @@ import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepResu
 import { BINARY_FILE, KEEP_AS_IS, Masker, REMOVED, commandPaths, mapStrings, mapStringsAsync, onDiskAllowed, maskArgsJsonAsync, maskContentAsync, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
 import { DEFAULTS, DEFAULT_LABELS, MODEL_LABELS, MODELS_DIR, ModelLayer, ModelUnavailable, ScanCache, WITHHELD_NOTE, externalFinder, loadFinder, modelFiles, modelUrl, newBudget } from './model'
-import type { Budget, Scan } from './model'
+import type { Budget, LoadStep, Scan } from './model'
 import { MODEL_VERSION } from './pii/models'
 import { parseList, sameMeaning, tidyList } from './listfile'
 import { scrubFile } from './scrub'
@@ -18,7 +18,7 @@ const EDIT = 'client-mask-edit'
 const FOLDER = 'client-mask-folder'
 const TIDY = 'client-mask-tidy'
 const MODEL = 'client-mask-model'
-const VERSION = '0.18.1'
+const VERSION = '0.18.2'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -88,6 +88,14 @@ let modelFpLoaded = ''
 let cacheFpLoaded = ''
 let cacheReady: Promise<void> = Promise.resolve()
 const cache = new ScanCache()
+
+// What the band shows between states, so a press or a load is never silent:
+// the load's step, a press not yet settled, and whether a scan is running.
+let modelStep: LoadStep | undefined
+let switching: 'on' | 'off' | undefined
+let scans = 0
+// Redraws the band from a scan, which has no `$` of its own; set at session start.
+let nudge: () => void = () => {}
 const SALT_KEY = 'scanSalt'
 const CLEAN_KEY = 'cleanHashes'
 // A broken model is tried again at most this often, so installing it needs no restart.
@@ -114,7 +122,15 @@ const maskFull = async (s: string, budget: Budget = newBudget()): Promise<Scan> 
   const hit = cache.remembered(key)
   if (hit) return hit
   const l = await getLayer()
-  const r = await l.scan(m.mask(s), budget)
+  scans++
+  if (scans === 1) nudge()
+  let r: Scan
+  try {
+    r = await l.scan(m.mask(s), budget)
+  } finally {
+    scans--
+    if (scans === 0) nudge()
+  }
   if (r.withheld) return r
   if (r.stable) cache.markClean(r.text === s ? key : await cache.key(r.text))
   if (r.text !== s) cache.remember(key, r)
@@ -195,13 +211,23 @@ const refreshModel = async ($: EngineInterface) => {
   if (modelFp === modelFpLoaded && !(modelState === 'broken' && now - modelBrokenAt > MODEL_RETRY_MS)) return
   modelFpLoaded = modelFp
   modelState = 'loading'
+  modelStep = undefined
   layer = null
+  void publish($).catch(() => {})
   const mc = cfg.model ?? {}
   // The words of your home and project folders (your account name, the folder
   // names): paths name them all the time and they are yours, not a client's.
   const cwd = await $.session.cwd().catch(() => '')
   const local = [home, cwd].flatMap(p => p.split(/[^\p{L}\p{N}]+/u)).filter(w => w.length >= 3)
-  modelPromise = loadFinder($, home, mc)
+  modelPromise = loadFinder($, home, mc, {
+    // A `$` call between the model's windows hands the worker back, so the band
+    // answers a press and redraws while a long text is scanned.
+    pause: () => $.clock.sleep(1).catch(() => {}),
+    onStep: s => {
+      modelStep = s
+      void publish($).catch(() => {})
+    },
+  })
     .then(async finder => {
       // Long texts go to the helper process; without Node they are withheld instead.
       const helper = await externalFinder($, home, mc, t => finder.tokens(t)).catch(() => null)
@@ -261,6 +287,9 @@ const publish = async ($: EngineInterface) => {
     detectors: masker?.detectorCount ?? 0,
     folders: config?.blockedFolders?.length ?? 0,
     model: modelState,
+    ...(modelState === 'loading' && modelStep ? { step: modelStep } : {}),
+    ...(switching ? { switching } : {}),
+    ...(scans > 0 ? { scanning: true } : {}),
   }
   const key = JSON.stringify(s)
   if (key === shown) return
@@ -724,6 +753,7 @@ const scrubHistory = ($: EngineInterface) => (home ? scrubPath($, `${home}/.clau
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    nudge = () => void publish($).catch(() => {})
     await ensure($)
     // Keeps the band current and the session marked after /clear.
     $.clock.every(5000, () => void ensure($))
@@ -1092,6 +1122,19 @@ export const register: Register = on => {
     const plural = (k: number, one: string) => `${k} ${one}${k === 1 ? '' : 's'}`
     // The masking button: each press switches masking on or off for this session.
     const step = async () => {
+      // A second press while the first is still being kept is ignored.
+      if (switching) return
+      // Shown at once: the press landed, and which way it goes.
+      switching = paused ? 'on' : 'off'
+      await publish($)
+      try {
+        await press()
+      } finally {
+        switching = undefined
+        await publish($)
+      }
+    }
+    const press = async () => {
       if (paused) {
         paused = false
         await update($, pausedAtom, () => false)
@@ -1121,8 +1164,20 @@ export const register: Register = on => {
     }
     const sep = <Text dimColor>{'  ·  '}</Text>
     const modelNote = s.model === 'on' ? '  ·  model on' : s.model === 'loading' ? '  ·  model starting' : s.model === 'off' ? '  ·  model off' : ''
+    const stepText = s.step === 'reading' ? 'reading the model files' : s.step === 'checking' ? 'checking the model files' : s.step === 'starting' ? 'starting the model' : 'loading the model'
     const mine =
-      s.level === 'on' && s.model === 'broken' ? (
+      s.switching ? (
+        <Box flexDirection="row">
+          <Text color="warning">{s.switching === 'on' ? '⏳ Switching masking on…' : '⏳ Switching masking off…'}</Text>
+        </Box>
+      ) : s.level === 'on' && s.model === 'loading' ? (
+        <Box flexDirection="row">
+          <Button key="mask" label="⏳ Masking starting" plain onPress={step} />
+          <Text dimColor>{`  ·  ${stepText}…  ·  nothing is sent until the lock shows`}</Text>
+          {sep}
+          <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
+        </Box>
+      ) : s.level === 'on' && s.model === 'broken' ? (
         <Box flexDirection="row">
           <Text color="error">⛔ Masking model is not running: nothing will be sent (/client-mask-model)</Text>
           {sep}
@@ -1154,7 +1209,7 @@ export const register: Register = on => {
             {`  ·  ${plural(s.names, 'name')}  ·  ${plural(s.detectors, 'kind')} of personal data  ·  list locked` +
               (s.folders > 0 ? `  ·  ${plural(s.folders, 'folder')} blocked` : '') +
               modelNote +
-              `  ·  last message: ${n} masked`}
+              (s.scanning ? '  ·  scanning…' : `  ·  last message: ${n} masked`)}
           </Text>
           {sep}
           <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
