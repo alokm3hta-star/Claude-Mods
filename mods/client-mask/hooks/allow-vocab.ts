@@ -25,8 +25,25 @@ export const ALLOW_VOCAB: readonly string[] = [
   'alex', 'aaron', 'adrian', 'anja', 'sarah', 'dana', 'kylie',
   // other vendors and tools
   'microsoft', 'azure', 'aws', 'amazon', 'google', 'gcp', 'ibm', 'oracle', 'salesforce', 'servicenow', 'workday', 'snowflake',
-  'databricks', 'anthropic', 'openai', 'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'slack', 'teams', 'sharepoint',
+  'databricks', 'anthropic',
+  // test, release and operations tools (2026-11-24: masked as names in a tooling document)
+  'xray', 'tosca', 'tricentis', 'neoload', 'loadrunner', 'puppet', 'ansible', 'selenium', 'cypress', 'playwright',
+  'postman', 'testrail', 'zephyr', 'qtest', 'sonarqube', 'dynatrace', 'appdynamics', 'splunk', 'grafana', 'citrix',
+  'vdi', 'jmeter', 'gatling', 'katalon', 'worksoft', 'opentext', 'qtp', 'uft', 'openai', 'github', 'gitlab', 'bitbucket', 'jira', 'confluence', 'slack', 'teams', 'sharepoint',
   'outlook', 'excel', 'powerbi', 'tableau', 'anaplan', 'kafka', 'kubernetes', 'docker', 'terraform', 'jenkins', 'python',
   'java', 'javascript', 'typescript', 'node', 'react', 'langchain', 'langgraph', 'langfuse', 'arize', 'mcp', 'llm', 'json',
   'yaml', 'xml', 'csv', 'sql', 'http', 'https', 'rest', 'soap', 'oauth', 'saml', 'jwt', 'ldap', 'scim', 'edi', 'sftp',
+]
+
+// Public documentation sites whose addresses the model may leave unmasked, so
+// sources can be cited. An address is kept only as a whole, only when its host
+// is one of these or ends in "." and one of these, and never when it names a
+// person (see model.ts, publicUrl). Vendor documentation and help sites only:
+// no tenant domains (such as a company's own atlassian.net or sharepoint.com).
+export const ALLOW_DOMAINS: readonly string[] = [
+  'sap.com', 'tricentis.com', 'getxray.app', 'atlassian.com', 'microsoft.com', 'aws.amazon.com', 'cloud.google.com',
+  'ibm.com', 'oracle.com', 'servicenow.com', 'salesforce.com', 'puppet.com', 'ansible.com', 'redhat.com',
+  'selenium.dev', 'cypress.io', 'playwright.dev', 'postman.com', 'sonarsource.com', 'dynatrace.com', 'splunk.com',
+  'grafana.com', 'citrix.com', 'apache.org', 'python.org', 'nodejs.org', 'mozilla.org', 'w3.org', 'ietf.org',
+  'iso.org', 'anthropic.com', 'claude.com', 'wikipedia.org', 'gov.uk', 'ncsc.gov.uk', 'ico.org.uk',
 ]

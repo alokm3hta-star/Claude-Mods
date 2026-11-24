@@ -233,6 +233,14 @@ export class Masker {
 
   mask(text: string): string {
     if (!text) return text
+    return this.outside(this.maskList(text), part => this.detector.mask(part))
+  }
+
+  // Your list only, without the detectors: for what the model itself writes
+  // into a local file or command, where a detector's label would only be
+  // refused by the label guard (a digit run read as a phone number).
+  maskList(text: string): string {
+    if (!text) return text
     let out = text
     this.removed = 0
     const rules = this.rules.filter(rule => this.applies(rule, text))
@@ -244,7 +252,7 @@ export class Masker {
         }),
       )
     }
-    return this.outside(out, part => this.detector.mask(part))
+    return out
   }
 
   restore(text: string): string {

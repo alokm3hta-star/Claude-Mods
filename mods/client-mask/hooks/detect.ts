@@ -2,6 +2,8 @@
 // Each match becomes a fixed label such as ‹EMAIL›. No key is kept, so a label
 // can never be turned back; the ‹ › marks make it plain that something was masked.
 
+import { trivialRun } from './digits'
+
 export type DetectorName = 'email' | 'phone' | 'niNumber' | 'iban' | 'card' | 'vatNumber' | 'secrets'
 
 export type Detect = Partial<Record<DetectorName, boolean>>
@@ -122,7 +124,7 @@ const RULES: Rule[] = [
     re: /(?<![\w.+-])(?:\+44 ?(?:\(0\) ?)?|0)(?:7\d{3}|[12]\d{1,4}|3\d{2}|8\d{2})[ -]?\d{3,4}[ -]?\d{3,4}(?![\w.-])/g,
     replace: m => {
       const n = digits(m.startsWith('+44') ? '0' + m.slice(3).replace(/^ ?\(0\)/, '') : m)
-      return n.length === 10 || n.length === 11 ? label('PHONE') : m
+      return (n.length === 10 || n.length === 11) && !trivialRun(n) ? label('PHONE') : m
     },
   },
 ]

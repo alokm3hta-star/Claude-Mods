@@ -200,3 +200,31 @@ then settles; while the model loads, the band shows "⏳ Masking starting" with 
 checking them, starting the model) and "nothing is sent until the lock shows"; the 🔒 shows only once the model is
 ready; while a scan runs, the lock row reads "scanning…". 105 tests pass. Not yet checked live: how long a press
 takes mid-scan, and whether the pauses slow a long scan (each is one host round trip per 256 tokens).
+
+## 13. 0.18.3: fewer false positives in document work (2026-11-24)
+
+A session editing a tooling document and checking vendor claims on the web lost its section numbers, product names
+and every source address to the model, the label guard then refused its edit scripts, and three subagents stopped
+with no report. Probed with the real model (medium v1.1.0) on made-up texts; causes and changes:
+- **Subagents stopped at once.** The Agent call's brief is masked by the list and detectors only (section 10), but it
+  comes back as a user message in the subagent's loop, where the check before each request ran the model on it and
+  counted whatever the model re-masked as a leak. Now every tool-call argument of 200 characters or more is marked
+  clean by its salted hash once masked, so the brief passes; it is the model's own text.
+- **Local writers keep their digits.** Write, Edit, MultiEdit, NotebookEdit and Bash arguments are masked by the list
+  only: the phone rule read `0123456789` in a Python command as a phone number and the guard refused the mod's own
+  label. Tools that send their arguments elsewhere (WebSearch, WebFetch, Agent, MCP) keep the detectors. The phone rule
+  also no longer matches a run that counts up or down or repeats one digit.
+- **Structural numbers.** An ID or phone span the model finds loses any line-number prefix (`2041→`, `2041\t`,
+  `2041:`, `path:2041:`), and a dotted section or version number (3.1.2.2.4, 2026.11.3) or a counting run is left. A
+  number after such a prefix (a staff number) is still masked.
+- **Products.** Test and operations tools (Xray, Tosca, Tricentis, NeoLoad, LoadRunner, Puppet, Ansible, Selenium…)
+  are allowed words; joining words (and, of, the…) no longer keep an otherwise allowed span masked ("Priya and Tosca"
+  is still masked). Sensitivity was not the cause: Tosca, NeoLoad and Tricentis were masked at 0.5, 0 and -0.5.
+- **Web addresses, whole.** The model tags an address in pieces, and masking some pieces let the rest through. Now an
+  address is one unit: left whole when its host is, or is under, a public documentation domain (`ALLOW_DOMAINS` in
+  allow-vocab.ts, plus the list's new `"model": {"allowDomains": [...]}`) and it carries no @, no personal query field
+  (user=, email=, id=…) and no profile path (/user/, /profile/, /in/…), and no name the model found inside it;
+  otherwise masked whole as ‹URL›. Tenant domains (a company's atlassian.net, sharepoint.com) are not on the list.
+Real-data controls in the probe (a person, a company, a phone number, an email, a staff number, a profile address, a
+tenant address) all stay masked. 111 tests pass (6 new). Not checked live yet: a subagent run with the model on.
+

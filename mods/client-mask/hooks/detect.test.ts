@@ -44,3 +44,10 @@ test('the leak check names the label, never the value', async () => {
   expect(d.leaks('reach me at jane.doe@northwind.test')).toEqual(['‹EMAIL›'])
   expect(d.leaks('already ‹EMAIL› and noreply@anthropic.com')).toEqual([])
 })
+
+test('a digit run that counts up or down, or repeats one digit, is no phone number', async () => {
+  const d = new Detector()
+  expect(d.mask("str.maketrans('0123456789', '')")).toBe("str.maketrans('0123456789', '')")
+  expect(d.mask('00000000000')).toBe('00000000000')
+  expect(d.mask('call 07700 900123')).toBe('call ‹PHONE›')
+})

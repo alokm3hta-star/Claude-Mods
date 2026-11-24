@@ -1,5 +1,5 @@
 import { test, expect } from 'claude-code/testing'
-import { DEFAULT_LABELS, ModelLayer, ScanCache, companySpans, machineId, validateModel, WITHHELD_NOTE, newBudget } from './model'
+import { DEFAULT_LABELS, ModelLayer, ScanCache, companySpans, machineId, publicUrl, structural, validateModel, WITHHELD_NOTE, newBudget } from './model'
 import type { SpanFinder } from './model'
 import { DeadlineError } from './pii/engine'
 import { Detector } from './detect'
@@ -191,4 +191,41 @@ test('a git short hash is a machine ID', () => {
 test("the wiki's agent names and their @-commands are left, other names are not", async () => {
   const r = await layer(fake({ Alex: 'PERSON', '@sarah': 'USERNAME', 'Priya Raman': 'PERSON' })).scan('Alex asks @sarah and Priya Raman')
   expect(r.text).toBe('Alex asks @sarah and ‹PERSON›')
+})
+
+test('section, version and line numbers the model calls IDs are left; a staff number is still masked', async () => {
+  const l = layer(fake({ '3.1.2.2.4': 'ID_NUMBER', '2041:3.1.2.2.4': 'ID_NUMBER', '2026.11.3': 'ID_NUMBER', '48213907': 'ID_NUMBER', '0123456789': 'PHONE' }))
+  expect((await l.scan('See section 3.1.2.2.4 first.')).text).toBe('See section 3.1.2.2.4 first.')
+  expect((await l.scan('2041:3.1.2.2.4 Regression packs')).text).toBe('2041:3.1.2.2.4 Regression packs')
+  expect((await l.scan('release 2026.11.3 is out')).text).toBe('release 2026.11.3 is out')
+  expect((await l.scan("str.maketrans('0123456789', '')")).text).toBe("str.maketrans('0123456789', '')")
+  expect((await l.scan('staff number 48213907 on file')).text).toBe('staff number ‹ID_NUMBER› on file')
+  // A line-number prefix is cut off; the ID after it is still masked.
+  expect((await layer(fake({ '12:48213907': 'ID_NUMBER' })).scan('notes.txt:12:48213907')).text).toBe('notes.txt:12:‹ID_NUMBER›')
+  expect(structural('  2041\t3.1.2.2.4 x', 2, 16)).toEqual([7, 7])
+})
+
+test('test and operations tools are allowed words; joining words do not keep a product span masked', async () => {
+  const l = layer(fake({ Xray: 'PERSON', Tosca: 'PERSON', NeoLoad: 'PERSON', 'Tricentis Tosca and Tricentis NeoLoad': 'ORG', 'Priya and Tosca': 'PERSON' }))
+  expect((await l.scan('Jira + Xray holds the cases; Tosca runs them; NeoLoad loads.')).text).toBe('Jira + Xray holds the cases; Tosca runs them; NeoLoad loads.')
+  expect((await l.scan('Tricentis Tosca and Tricentis NeoLoad are licensed together.')).text).toBe('Tricentis Tosca and Tricentis NeoLoad are licensed together.')
+  expect((await l.scan('Priya and Tosca met.')).text).toBe('‹PERSON› met.')
+})
+
+test('a public documentation address is left whole; any other address is masked whole, never in pieces', async () => {
+  const docs = 'https://docs.tricentis.com/tosca/en-us/content/index.htm'
+  const l = layer(fake({ 'https://docs.tricentis.com/': 'URL', tosca: 'URL_L2', 'index.htm': 'URL', 'https://halverton.atlassian.net/wiki': 'URL', 'https://community.sap.com/t5/user/': 'URL', 'https://help.sap.com/docs': 'URL', 'Priya': 'PERSON' }))
+  expect((await l.scan(`Source: ${docs}.`)).text).toBe(`Source: ${docs}.`)
+  expect((await l.scan('[Help](https://help.sap.com/docs/x.html)')).text).toBe('[Help](https://help.sap.com/docs/x.html)')
+  expect((await l.scan('See https://halverton.atlassian.net/wiki/spaces/T/pages/1 now')).text).toBe('See ‹URL› now')
+  expect((await l.scan('https://community.sap.com/t5/user/viewprofilepage/user-id/48213')).text).toBe('‹URL›')
+  expect((await l.scan('https://help.sap.com/docs/Priya')).text).toBe('‹URL›')
+  expect(publicUrl('https://docs.tricentis.com/a?user=kim', ['tricentis.com'])).toBe(false)
+  expect(publicUrl('https://evil-tricentis.com/a', ['tricentis.com'])).toBe(false)
+  expect(publicUrl('https://kim@docs.tricentis.com/a', ['tricentis.com'])).toBe(false)
+  // Your own public sites, from the list.
+  const own = layer(fake({ 'https://docs.example-vendor.io/guide': 'URL' }), null, { allowDomains: ['example-vendor.io'] })
+  expect((await own.scan('https://docs.example-vendor.io/guide')).text).toBe('https://docs.example-vendor.io/guide')
+  expect(validateModel({ allowDomains: ['docs.example.com'] })).toEqual([])
+  expect(validateModel({ allowDomains: ['not a host'] })[0]).toContain('allowDomains')
 })

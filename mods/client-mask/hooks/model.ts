@@ -1,6 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
-import { ALLOW_VOCAB } from './allow-vocab'
+import { ALLOW_DOMAINS, ALLOW_VOCAB } from './allow-vocab'
+import { trivialRun } from './digits'
 import { createDetector, family, LABELS, TAGS } from './pii/detector'
 import { createEngine, DeadlineError } from './pii/engine'
 import { MODEL_FILES, MODEL_VERSION } from './pii/models'
@@ -29,6 +30,9 @@ export type ModelConfig = {
   timeoutMs?: number
   // Words the model may leave unmasked (products, your own terms); compared in lower case.
   allow?: string[]
+  // Public sites whose web addresses the model may leave unmasked, as host names
+  // ("docs.example.com" or "example.com", which covers its subdomains).
+  allowDomains?: string[]
 }
 
 export const MODEL_LABELS: readonly string[] = LABELS
@@ -95,7 +99,7 @@ export const validateModel = (m: unknown): string[] => {
   if (!m || typeof m !== 'object' || Array.isArray(m)) return ['the list\'s "model" must be an object of settings']
   const c = m as Record<string, unknown>
   const p: string[] = []
-  const known = new Set(['enabled', 'size', 'labels', 'sensitivity', 'maxTokens', 'timeoutMs', 'allow'])
+  const known = new Set(['enabled', 'size', 'labels', 'sensitivity', 'maxTokens', 'timeoutMs', 'allow', 'allowDomains'])
   for (const k of Object.keys(c)) if (!known.has(k)) p.push(`the list's "model" has an unknown setting "${k}"`)
   if (c.enabled !== undefined && typeof c.enabled !== 'boolean') p.push('the list\'s "model.enabled" must be true or false')
   if (c.size !== undefined && !(typeof c.size === 'string' && c.size in MODEL_FILES)) p.push('the list\'s "model.size" must be "medium", "large", "small" or "nano"')
@@ -107,6 +111,8 @@ export const validateModel = (m: unknown): string[] => {
     if (c[k] !== undefined && !(typeof c[k] === 'number' && Number.isInteger(c[k]) && (c[k] as number) > 0)) p.push(`the list's "model.${k}" must be a whole number above 0`)
   if (c.allow !== undefined && !(Array.isArray(c.allow) && c.allow.every(w => typeof w === 'string' && w.trim() !== '')))
     p.push('the list\'s "model.allow" must be a list of words')
+  if (c.allowDomains !== undefined && !(Array.isArray(c.allowDomains) && c.allowDomains.every(d => typeof d === 'string' && /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(d.trim()))))
+    p.push('the list\'s "model.allowDomains" must be a list of host names, such as "docs.example.com"')
   return p
 }
 
@@ -240,6 +246,8 @@ export type LayerOptions = {
   maxTokens?: number
   timeoutMs?: number
   allow?: readonly string[]
+  // Public sites whose addresses are left unmasked, on top of the built-in ones.
+  allowDomains?: readonly string[]
   // Ranges of a text already masked (placeholders and labels): never touched again.
   marked: (text: string) => [number, number][]
   // At most this many passes; a pass runs only when the one before masked something.
@@ -262,6 +270,7 @@ export class ModelLayer {
   private readonly external: SpanFinder | null
   private readonly labels: Set<string>
   private readonly allow: Set<string>
+  private readonly domains: string[]
   private readonly opts: LayerOptions
   private queue: Promise<unknown> = Promise.resolve()
   // Tokens a second in this process, measured; starts low so early guesses err towards the helper.
@@ -274,6 +283,7 @@ export class ModelLayer {
     this.opts = opts
     this.labels = new Set(opts.labels ?? DEFAULT_LABELS)
     this.allow = new Set([...ALLOW_VOCAB, ...(opts.allow ?? [])].map(w => w.trim().toLowerCase()))
+    this.domains = [...ALLOW_DOMAINS, ...(opts.allowDomains ?? [])].map(d => d.trim().toLowerCase().replace(/^www\./, ''))
   }
 
   // A span is left alone only when every word in it is an allowed word, or the
@@ -281,7 +291,9 @@ export class ModelLayer {
   allowed(value: string): boolean {
     const v = value.trim().toLowerCase()
     if (this.allow.has(v)) return true
-    const w = words(v)
+    // Joining words ("Tricentis Tosca and Tricentis NeoLoad") carry no name;
+    // "Priya and Tosca" is still masked, Priya being no allowed word.
+    const w = words(v).filter(x => !CONNECTORS.has(x))
     return w.length === 0 || w.every(x => this.allow.has(x))
   }
 
@@ -366,11 +378,45 @@ export class ModelLayer {
     return { text: cur, stable, found }
   }
 
+  // Web addresses as one whole each. The model often tags an address in
+  // pieces (the host, then parts of the path), and masking only some of them
+  // let the rest through. Every span that touches an address becomes the whole
+  // address: left out when it is a public page (publicUrl), else masked whole
+  // as ‹URL›, never by the path rule.
+  wholeUrls(text: string, spans: { start: number; end: number; label: string }[]): Span2[] {
+    const urls = [...text.matchAll(URL_TOKEN)].map(m => {
+      const start = m.index ?? 0
+      const raw = m[0].replace(/[.,;:!?'"]+$/, '')
+      return { start, end: start + raw.length, value: raw }
+    })
+    if (urls.length === 0) return spans
+    const out: Span2[] = []
+    const done = new Set<number>()
+    for (const s of spans) {
+      const i = urls.findIndex(u => s.start < u.end && s.end > u.start)
+      if (i < 0) {
+        out.push(s)
+        continue
+      }
+      if (done.has(i)) continue
+      done.add(i)
+      const u = urls[i] as { start: number; end: number; value: string }
+      // A name, ID or address the model finds inside a public page's address
+      // (a user's page, a profile) masks the whole address too.
+      const inside = spans.filter(x => x.start < u.end && x.end > u.start)
+      const named = inside.some(x => x.label !== 'URL' && x.label !== 'URL_L2' && this.labels.has(x.label) && !this.allowed(text.slice(x.start, x.end)))
+      if (!named && publicUrl(u.value, this.domains)) continue
+      out.push({ start: Math.min(u.start, s.start), end: Math.max(u.end, ...inside.map(x => x.end)), label: 'URL', whole: true })
+    }
+    return out.sort((x, y) => x.start - y.start)
+  }
+
   // The model's spans as edits: enabled kinds only, clipped to what is not
   // already masked, trimmed of white space, and not wholly allowed words.
-  edits(text: string, spans: { start: number; end: number; label: string }[]): { start: number; end: number; label: string }[] {
+  edits(text: string, found: { start: number; end: number; label: string }[]): { start: number; end: number; label: string }[] {
     const marked = this.opts.marked(text).sort((a, b) => a[0] - b[0])
     const out: { start: number; end: number; label: string }[] = []
+    const spans = this.wholeUrls(text, found)
     for (const s of spans) {
       if (!this.labels.has(s.label)) continue
       // The parts of the span outside every marked range.
@@ -388,8 +434,9 @@ export class ModelLayer {
       for (let [a, b] of pieces) {
         while (a < b && /\s/.test(text[a] as string)) a++
         while (b > a && /\s/.test(text[b - 1] as string)) b--
+        if (s.label === 'ID_NUMBER' || s.label === 'PHONE') [a, b] = structural(text, a, b)
         if (a >= b || this.allowed(text.slice(a, b))) continue
-        if (machineId(text, a, b, s.label)) continue
+        if (!s.whole && machineId(text, a, b, s.label)) continue
         out.push({ start: a, end: b, label: family(s.label) })
       }
     }
@@ -478,6 +525,51 @@ export const WITHHELD_NOTE: Record<NonNullable<Scan['withheld']>, string> = {
   'too long': '‹WITHHELD› client-mask held this text back: it is too long to scan for personal data. Ask for a smaller part (a line range, a filter, a head or tail).',
   'too slow': '‹WITHHELD› client-mask held this text back: scanning it for personal data took too long. Ask for a smaller part.',
   failed: '‹WITHHELD› client-mask held this text back: it could not be scanned for personal data.',
+}
+
+type Span2 = { start: number; end: number; label: string; whole?: boolean }
+
+// Words that join a name's parts and carry no name of their own.
+const CONNECTORS = new Set(['and', 'or', 'of', 'the', 'for', 'with', 'from', 'by', 'to', 'in', 'on', 'a', 'an'])
+
+// A web address with a scheme or www., up to white space or a closing bracket or quote.
+const URL_TOKEN = /(?<![\p{L}\p{N}])(?:https?:\/\/|www\.)[^\s<>"'`)\]]+/giu
+
+// Paths and query fields that name a person on an otherwise public site.
+const PERSONAL_PATH = /\/(?:users?|profiles?|people|persons?|members?|authors?|in|u|~[^/]*|viewprofilepage|user-id)(?:\/|$)/i
+const PERSONAL_QUERY = /[?&#](?:e?mail|user(?:name|_?id)?|uid|login|name|first_?name|last_?name|phone|tel|mobile|token|key|sig|session)=/i
+
+// An address on a public documentation site that names no one: its host is an
+// allowed domain or under one, and it carries no @, no personal query field and
+// no profile path. Anything else the model tagged stays masked.
+export function publicUrl(value: string, domains: readonly string[]): boolean {
+  const m = value.match(/^(?:https?:\/\/)?([^/?#]+)(.*)$/i)
+  if (!m) return false
+  const authority = (m[1] as string).toLowerCase()
+  if (authority.includes('@')) return false
+  const host = authority.replace(/:\d+$/, '').replace(/^www\./, '')
+  if (!domains.some(d => host === d || host.endsWith(`.${d}`))) return false
+  const rest = m[2] as string
+  if (rest.includes('@') || PERSONAL_QUERY.test(rest) || PERSONAL_PATH.test(rest)) return false
+  return true
+}
+
+// A number the model calls an ID or phone number that is document structure:
+// a line-number prefix (file reads, grep -n, a "path:line:" match) is cut off
+// the span, and a dotted section or version number (3.1.2.2.4, 10.2, 2026.11.3)
+// is dropped. What is left after a prefix (a staff number) is still masked.
+// Answers the span to judge, empty when nothing is left.
+export function structural(text: string, a: number, b: number): [number, number] {
+  const lineStart = text.lastIndexOf('\n', a - 1) + 1
+  const head = text.slice(lineStart, b)
+  const prefix = head.match(/^(?:\s*\d{1,7}(?:[\t→]|:(?=\S))|[^\s:]+:\d{1,7}[:-]|[^\s:]+-\d{1,7}-)/)
+  if (prefix && lineStart + prefix[0].length > a) a = Math.min(b, lineStart + prefix[0].length)
+  while (a < b && /[\s:]/.test(text[a] as string)) a++
+  const value = text.slice(a, b).replace(/[.:]+$/, '')
+  if (/^\d{1,4}(?:\.\d{1,2}){1,6}$/.test(value)) return [a, a]
+  // A run that counts up or down, or one digit repeated (0123456789 in code).
+  if (/^\d{6,}$/.test(value) && trivialRun(value)) return [a, a]
+  return [a, b]
 }
 
 // An ID or user name the model found that is part of a file path, or a machine

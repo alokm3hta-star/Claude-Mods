@@ -18,7 +18,7 @@ const EDIT = 'client-mask-edit'
 const FOLDER = 'client-mask-folder'
 const TIDY = 'client-mask-tidy'
 const MODEL = 'client-mask-model'
-const VERSION = '0.18.2'
+const VERSION = '0.18.3'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -40,7 +40,7 @@ const TEMPLATE = {
     '(a copy of the original is kept where Claude cannot open it; "keepOriginals": false keeps none; ' +
     'only folders in "maskOnDiskIn", when set, are rewritten, and never those in "keepOnDisk"). /client-mask-folder <folder> masks a whole folder on disk at once, with no model involved. ' +
     'Names, companies, addresses and IDs that are on no list are masked one way by an on-device model (‹PERSON›, ‹ORG›…); ' +
-    'while it cannot run, nothing is sent. List words it may leave alone in "model": {"allow": [...]}, or switch it off with "model": {"enabled": false}; /client-mask-model shows its state.',
+    'while it cannot run, nothing is sent. List words it may leave alone in "model": {"allow": [...]} and public sites whose addresses it may leave in "model": {"allowDomains": ["docs.example.com"]}, or switch it off with "model": {"enabled": false}; /client-mask-model shows its state.',
   detect: {},
   keep: [],
   blockedFolders: [],
@@ -135,6 +135,16 @@ const maskFull = async (s: string, budget: Budget = newBudget()): Promise<Scan> 
   if (r.stable) cache.markClean(r.text === s ? key : await cache.key(r.text))
   if (r.text !== s) cache.remember(key, r)
   return r
+}
+
+// The model's own text (tool-call arguments, masked by the list and detectors):
+// marked clean, so the check before each request passes it where it comes back
+// as a message, as a subagent's brief does. Shorter ones are not worth a cache entry.
+const BRIEF_MIN = 200
+const markOwnText = async (s: string) => {
+  await cacheReady
+  if (!cache.ready) return
+  cache.markClean(await cache.key(s))
 }
 
 // A masked text, or the note that stands in for one that could not be scanned.
@@ -235,6 +245,7 @@ const refreshModel = async ($: EngineInterface) => {
         labels: mc.labels ?? DEFAULT_LABELS,
         maxTokens: mc.maxTokens ?? DEFAULTS.maxTokens,
         timeoutMs: mc.timeoutMs ?? DEFAULTS.timeoutMs,
+        allowDomains: mc.allowDomains ?? [],
         allow: [...(mc.allow ?? []), ...local, ...(cfg.keepAsIs ?? []), ...(cfg.keep ?? []).filter(k => !k.startsWith('*@'))],
         marked: t => masker?.marked(t) ?? [],
       })
@@ -530,18 +541,22 @@ const savedConversations = async ($: EngineInterface, pick: (session: string, mt
 type StepChunk = TurnStepChunk
 export const maskToolArgs = async function* (
   stream: HookStream<StepChunk, TurnStepResult>,
-  mask: (s: string) => Promise<string>,
+  mask: (s: string, tool: string) => Promise<string>,
 ): AsyncGenerator<StepChunk, TurnStepResult> {
   let held: { index: number; chunks: StepChunk[]; json: string } | null = null
+  // Each block's tool, from its `tool` chunk: what a call's arguments are masked with depends on it.
+  const tools = new Map<number, string>()
   const flush = async function* (): AsyncGenerator<StepChunk> {
     if (!held) return
     const { index, chunks, json } = held
     held = null
-    const masked = await maskArgsJsonAsync(json, mask)
+    const tool = tools.get(index) ?? ''
+    const masked = await maskArgsJsonAsync(json, s => mask(s, tool))
     if (masked === json) yield* chunks
     else yield { kind: 'input', index, json: masked }
   }
   for await (const c of stream) {
+    if (c.kind === 'tool') tools.set(c.index, c.name)
     if (c.kind === 'input') {
       if (held && held.index !== c.index) yield* flush()
       held ??= { index: c.index, chunks: [], json: '' }
@@ -561,7 +576,7 @@ export const maskToolArgs = async function* (
   // not the one auto mode reviewed, so it would be refused.
   const toolUses: (typeof r.toolUses)[number][] = []
   for (const t of r.toolUses) {
-    const input = (await mapStringsAsync(t.input, mask)) as typeof t.input
+    const input = (await mapStringsAsync(t.input, s => mask(s, t.name))) as typeof t.input
     toolUses.push(JSON.stringify(input) === JSON.stringify(t.input) ? t : { ...t, input })
   }
   return toolUses.every((t, i) => t === r.toolUses[i]) ? r : { ...r, toolUses }
@@ -1053,7 +1068,20 @@ export const register: Register = on => {
       // list and the detectors only: the model read nothing unmasked, and
       // running the on-device model here labelled paths and code, which the
       // label guard then refused. What comes back still goes through the model.
-      return yield* maskToolArgs(next(e), async s => (isOn() && masker ? masker.mask(s) : s))
+      return yield* maskToolArgs(next(e), async (s, tool) => {
+        if (!isOn() || !masker) return s
+        // Local tools that write (files, commands): your list only. A detector
+        // label here (a digit run read as a phone number) is the mod's own, and
+        // the label guard would refuse the call for it; the model can only
+        // write what it was sent masked, or made up.
+        const out = toolMatches(tool, WRITERS) ? masker.maskList(s) : masker.mask(s)
+        // A long argument (an agent's brief above all) comes back as a message
+        // in the subagent's own loop, where the check before each request would
+        // run the model on it and stop the agent for what the model re-masked.
+        // It is the model's own text, masked as above: known clean.
+        if (out.length >= BRIEF_MIN && modelWanted()) await markOwnText(out)
+        return out
+      })
     }
     $.ui.toast(note, { timeoutMs: 10000 })
     yield { kind: 'text', index: 0, text: note }

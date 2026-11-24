@@ -959,3 +959,40 @@ test('while the model loads the band says what it is doing, and the lock shows o
   expect(await ui.find({ type: 'Button', text: '🔒 Masking on' })).toBeUndefined()
   await ui.unmount()
 })
+
+// One tool call of the given tool, streamed beneath the plugin.
+const callBeneath = (on: On, name: string, input: Record<string, unknown>) => {
+  on('turn.step', async function* () {
+    yield { kind: 'tool', index: 0, id: 't1', name }
+    yield { kind: 'input', index: 0, json: JSON.stringify(input) }
+    yield { kind: 'stop', stopReason: 'tool_use', usage: null }
+    return { turnId: 'x', index: 0, answer: '', toolUses: [{ name, input }], stopReason: 'tool_use', usage: null }
+  } as never)
+}
+
+test("a command the model writes keeps its digits: only your list masks a local writer's arguments", async ($, on) => {
+  disk(on)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
+  callBeneath(on, 'Bash', { command: "python3 -c \"t = str.maketrans('0123456789', '') # Northwind Revenue, 07700 900123\"" })
+  const { chunks, result } = await runStep($)
+  const json = chunks.filter(c => c.kind === 'input').map(c => c.json).join('')
+  const command = JSON.parse(json).command as string
+  expect(command).toContain("'0123456789'")
+  expect(command).toContain('07700 900123')
+  expect(command).toContain('CLIENT_3')
+  expect(command).not.toContain('Northwind')
+  expect(JSON.stringify(result)).not.toContain('‹PHONE›')
+})
+
+test("an agent's brief or a web search still has personal data masked by the detectors", async ($, on) => {
+  disk(on)
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
+  callBeneath(on, 'WebSearch', { query: 'who has 07700 900123 or kim@acme-client.example' })
+  const { chunks } = await runStep($)
+  const query = JSON.parse(chunks.filter(c => c.kind === 'input').map(c => c.json).join('')).query as string
+  expect(query).toBe('who has ‹PHONE› or ‹EMAIL›')
+})
