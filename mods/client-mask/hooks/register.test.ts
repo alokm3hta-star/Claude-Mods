@@ -8,6 +8,8 @@ const HOME = '/home/t'
 const LIST_PATH = `${HOME}/.claude/client-mask/terms.json`
 const LIST = {
   startOn: true,
+  // These tests are about the list; the model has tests of its own (model.test.ts).
+  model: { enabled: false },
   blockedFolders: ['~/client-exports'],
   terms: [
     { real: 'Northwind Revenue', placeholder: 'CLIENT_3' },
@@ -337,7 +339,7 @@ test("a reply on screen shows the real name; what reached the model does not cha
 })
 
 test('the masking button switches masking off and back on', async ($, on) => {
-  disk(on, JSON.stringify({ startOn: true, terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }, { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] }] }))
+  disk(on, JSON.stringify({ startOn: true, model: { enabled: false }, terms: [{ real: 'NWR', placeholder: 'CLIENT_3' }, { real: 'TRM', placeholder: 'SYSTEM_1', onlyWith: ['NWR'] }] }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return h(Box, {}) as never
@@ -462,7 +464,7 @@ test('the final tool calls keep their own objects when nothing is masked; a name
   const run = async (toolUses: unknown[]) => {
     const result = { turnId: 'x', index: 0, answer: '', toolUses, stopReason: 'tool_use', usage: null }
     const gen = (async function* () {})()
-    const it = maskToolArgs(Object.assign(gen, { result: Promise.resolve(result) }) as never, m)
+    const it = maskToolArgs(Object.assign(gen, { result: Promise.resolve(result) }) as never, s => Promise.resolve(m.mask(s)))
     let r = await it.next()
     while (!r.done) r = await it.next()
     return { result, out: r.value as unknown as typeof result }
@@ -489,7 +491,7 @@ for (const [label, pieces] of [
       { kind: 'engine', ref: 9 },
       { kind: 'stop', stopReason: 'tool_use', usage: null, ref: 10 },
     ])
-    const gen = maskToolArgs(stream, m)
+    const gen = maskToolArgs(stream, s => Promise.resolve(m.mask(s)))
     for (let r = await gen.next(); !r.done; r = await gen.next()) out.push(r.value as never)
     const kinds = out.map(c => c.kind)
     expect(kinds.lastIndexOf('input')).toBeLessThan(kinds.indexOf('engine'))
@@ -511,7 +513,7 @@ test('API-formatted arguments with nothing to mask pass on as the very same chun
   ]
   const stream = fakeStream([{ kind: 'tool', index: 0, id: 't1', name: 'Bash', ref: 1 }, ...pieces, { kind: 'engine', ref: 9 }])
   const out: unknown[] = []
-  const gen = maskToolArgs(stream, m)
+  const gen = maskToolArgs(stream, s => Promise.resolve(m.mask(s)))
   for (let r = await gen.next(); !r.done; r = await gen.next()) out.push(r.value)
   const inputs = out.filter(c => (c as { kind: string }).kind === 'input')
   expect(inputs.length).toBe(3)
@@ -527,7 +529,7 @@ test('API-formatted arguments with a name are still masked', async () => {
     { kind: 'engine', ref: 9 },
   ])
   const out: { kind: string; json?: string }[] = []
-  const gen = maskToolArgs(stream, m)
+  const gen = maskToolArgs(stream, s => Promise.resolve(m.mask(s)))
   for (let r = await gen.next(); !r.done; r = await gen.next()) out.push(r.value as never)
   const json = out.filter(c => c.kind === 'input').map(c => c.json).join('')
   expect(json).not.toContain('Northwind')
@@ -561,7 +563,7 @@ test("a name in clear text in what the model is sent still stops the request", a
 })
 
 test('SAP in a tool call the model writes stays SAP, in the stream and for local tools', async ($, on) => {
-  disk(on, JSON.stringify({ startOn: true, terms: [{ real: 'TRM', placeholder: 'SAP' }] }))
+  disk(on, JSON.stringify({ startOn: true, model: { enabled: false }, terms: [{ real: 'TRM', placeholder: 'SAP' }] }))
   on('ui.status', () => ({ value: undefined }) as never)
   on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
   let seen = ''
@@ -578,7 +580,7 @@ test('SAP in a tool call the model writes stays SAP, in the stream and for local
 })
 
 test('masking switched on mid-conversation: what was already sent never stops it; what is new is still checked', async ($, on) => {
-  disk(on, JSON.stringify({ terms: [{ real: 'TRM', placeholder: 'SAP' }] }))
+  disk(on, JSON.stringify({ model: { enabled: false }, terms: [{ real: 'TRM', placeholder: 'SAP' }] }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return h(Box, {}) as never
@@ -605,7 +607,7 @@ test('masking switched on mid-conversation: what was already sent never stops it
 })
 
 test('a new session starts with masking off: nothing is masked until it is switched on', async ($, on) => {
-  disk(on, JSON.stringify({ terms: [{ real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] }))
+  disk(on, JSON.stringify({ model: { enabled: false }, terms: [{ real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return h(Box, {}) as never
@@ -629,7 +631,7 @@ test('a new session starts with masking off: nothing is masked until it is switc
 })
 
 test('the list folder stays private even while masking is off', async ($, on) => {
-  disk(on, JSON.stringify({ terms: [] }))
+  disk(on, JSON.stringify({ model: { enabled: false }, terms: [] }))
   on('ui.status', () => ({ value: undefined }) as never)
   const listFile = [HOME, '.claude', 'client' + '-mask', 'terms.json'].join('/')
   const r = await $.tool.call({ tool: 'Read', file_path: listFile } as never)
@@ -771,4 +773,25 @@ test('/client-mask-tidy leaves a tidy list and its saved copy alone, whatever it
   const r = JSON.stringify(await $.command.run({ command: 'client-mask-tidy', args: '' } as never))
   expect(r).toContain('already tidy')
   expect(files[`${LIST_PATH}.before-tidy`]).toBe(original)
+})
+
+test('with the model wanted but not installed, nothing is sent: the request is stopped', async ($, on) => {
+  disk(on, JSON.stringify({ startOn: true, terms: [] }))
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
+  stepBeneath(on, ['{"prompt":"ok"}'])
+  const { chunks } = await runStep($)
+  expect(JSON.stringify(chunks)).toContain('masking model is not installed')
+  expect(chunks.some(c => c.kind === 'input')).toBe(false)
+})
+
+test('with the model switched off in the list, the list and detectors still mask', async ($, on) => {
+  disk(on, JSON.stringify({ startOn: true, model: { enabled: false }, terms: [{ real: 'Northwind Revenue', placeholder: 'CLIENT_3' }] }))
+  on('ui.status', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.messages', () => ({ value: [{ role: 'user', content: 'hi' }] }) as never)
+  stepBeneath(on, ['{"prompt":"brief for Northwind Revenue"}'])
+  const { chunks } = await runStep($)
+  expect(chunks.filter(c => c.kind === 'input').map(c => c.json).join('')).toBe('{"prompt":"brief for CLIENT_3"}')
 })

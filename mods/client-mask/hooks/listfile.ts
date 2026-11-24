@@ -202,7 +202,7 @@ export const parseList = (text: string): Parsed => {
 const SETTINGS = [
   'enabled', 'startOn', 'onLeak', 'showRealNames', 'restoreInTools', 'maskFilesInPlace', 'keepOriginals',
   'maskOnDiskIn', 'keepOnDisk', 'guardOverwrites', 'blockBinaryFiles', 'blockPictures', 'wholeWord',
-  'keepAsIs', 'keep', 'blockedFolders', 'detect',
+  'keepAsIs', 'keep', 'blockedFolders', 'detect', 'model',
 ]
 const ROW_FIRST = ['real', 'pattern', 'placeholder']
 

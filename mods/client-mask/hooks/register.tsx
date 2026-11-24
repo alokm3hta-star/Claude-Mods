@@ -1,8 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, HookStream, Register, TurnStepChunk, TurnStepResult } from 'claude-code'
 
-import { BINARY_FILE, KEEP_AS_IS, Masker, REMOVED, commandPaths, mapStrings, onDiskAllowed, maskArgsJson, maskContent, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
+import { BINARY_FILE, KEEP_AS_IS, Masker, REMOVED, commandPaths, mapStrings, mapStringsAsync, onDiskAllowed, maskArgsJsonAsync, maskContentAsync, namesBlockedFolder, namesList, scannable, toolMatches, validate, writesLabel } from './mask'
 import type { Config } from './mask'
+import { DEFAULTS, DEFAULT_LABELS, MODEL_LABELS, MODELS_DIR, ModelLayer, ModelUnavailable, ScanCache, WITHHELD_NOTE, externalFinder, loadFinder, modelFiles, modelUrl, newBudget } from './model'
+import type { Budget, Scan } from './model'
+import { MODEL_VERSION } from './pii/models'
 import { parseList, sameMeaning, tidyList } from './listfile'
 import { scrubFile } from './scrub'
 import type { MaskStatus } from '../types'
@@ -14,6 +17,8 @@ const VIEW = 'client-mask-view'
 const EDIT = 'client-mask-edit'
 const FOLDER = 'client-mask-folder'
 const TIDY = 'client-mask-tidy'
+const MODEL = 'client-mask-model'
+const VERSION = '0.18.0'
 const DEFAULT_RESTORE = ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Grep', 'Glob']
 // Tools that change files: a masked label in what they write would overwrite
 // the real value, so such a call is refused.
@@ -33,7 +38,9 @@ const TEMPLATE = {
     'a full rewrite of a file that holds real names is then refused, unless "guardOverwrites": false. ' +
     'Or set "maskFilesInPlace": true to mask each text file on disk before Claude reads, edits, greps or runs a command on it ' +
     '(a copy of the original is kept where Claude cannot open it; "keepOriginals": false keeps none; ' +
-    'only folders in "maskOnDiskIn", when set, are rewritten, and never those in "keepOnDisk"). /client-mask-folder <folder> masks a whole folder on disk at once, with no model involved.',
+    'only folders in "maskOnDiskIn", when set, are rewritten, and never those in "keepOnDisk"). /client-mask-folder <folder> masks a whole folder on disk at once, with no model involved. ' +
+    'Names, companies, addresses and IDs that are on no list are masked one way by an on-device model (‹PERSON›, ‹ORG›…); ' +
+    'while it cannot run, nothing is sent. List words it may leave alone in "model": {"allow": [...]}, or switch it off with "model": {"enabled": false}; /client-mask-model shows its state.',
   detect: {},
   keep: [],
   blockedFolders: [],
@@ -68,29 +75,176 @@ let checkedAt = 0
 let paused = false
 
 const isOn = () => broken === null && masker !== null && config?.enabled !== false && !paused
-const mask = (s: string) => (isOn() && masker ? masker.mask(s) : s)
+
+// The on-device model. 'broken' while it is wanted but cannot run: then nothing
+// is sent. Its reason names the files' problem, never any text.
+type ModelState = 'off' | 'loading' | 'on' | 'broken'
+let modelState: ModelState = 'off'
+let modelReason: string | null = null
+let modelBrokenAt = 0
+let layer: ModelLayer | null = null
+let modelPromise: Promise<void> = Promise.resolve()
+let modelFpLoaded = ''
+let cacheFpLoaded = ''
+let cacheReady: Promise<void> = Promise.resolve()
+const cache = new ScanCache()
+const SALT_KEY = 'scanSalt'
+const CLEAN_KEY = 'cleanHashes'
+// A broken model is tried again at most this often, so installing it needs no restart.
+const MODEL_RETRY_MS = 30 * 1000
+
+const modelWanted = () => isOn() && config?.model?.enabled !== false
+
+const getLayer = async (): Promise<ModelLayer> => {
+  await modelPromise
+  if (!layer) throw new ModelUnavailable(modelReason ?? 'the masking model is not running')
+  return layer
+}
+
+// Your list, the detectors, then the model, in that order: what the list
+// masked is never touched again. Throws ModelUnavailable while the model is
+// wanted but cannot run. A result with `withheld` must not be sent.
+const maskFull = async (s: string, budget: Budget = newBudget()): Promise<Scan> => {
+  if (!isOn() || !masker) return { text: s, stable: true, found: 0 }
+  const m = masker
+  if (!modelWanted()) return { text: m.mask(s), stable: true, found: 0 }
+  await cacheReady
+  const key = await cache.key(s)
+  if (cache.isClean(key)) return { text: s, stable: true, found: 0 }
+  const hit = cache.remembered(key)
+  if (hit) return hit
+  const l = await getLayer()
+  const r = await l.scan(m.mask(s), budget)
+  if (r.withheld) return r
+  if (r.stable) cache.markClean(r.text === s ? key : await cache.key(r.text))
+  if (r.text !== s) cache.remember(key, r)
+  return r
+}
+
+// A masked text, or the note that stands in for one that could not be scanned.
+let withheldNow = 0
+const maskOrNote = async (s: string, budget: Budget = newBudget()): Promise<string> => {
+  let r: Scan
+  try {
+    r = await maskFull(s, budget)
+  } catch {
+    withheldNow++
+    return WITHHELD_NOTE.failed
+  }
+  if (r.withheld) {
+    withheldNow++
+    return WITHHELD_NOTE[r.withheld]
+  }
+  return r.text
+}
+
+// What a masked text gained, by placeholder or label.
+const gained = (before: string, after: string): Map<string, number> => {
+  const out = new Map<string, number>()
+  if (!masker || before === after) return out
+  const was = masker.markCounts(before)
+  for (const [mark, n] of masker.markCounts(after)) {
+    const g = n - (was.get(mark) ?? 0)
+    if (g > 0) out.set(mark, g)
+  }
+  return out
+}
 
 // Masks and counts how many items the text gained, by placeholder or label.
 // Kept in memory for this message only, and never names what was masked.
 let counted = 0
 const swaps = new Map<string, number>()
-const countingMask = (s: string) => {
-  const out = mask(s)
-  if (masker && isOn() && masker.removed > 0) {
-    counted += masker.removed
-    swaps.set(REMOVED, (swaps.get(REMOVED) ?? 0) + masker.removed)
-  }
-  if (masker && out !== s) {
-    const before = masker.markCounts(s)
-    for (const [mark, n] of masker.markCounts(out)) {
-      const gained = n - (before.get(mark) ?? 0)
-      if (gained <= 0) continue
-      counted += gained
-      swaps.set(mark, (swaps.get(mark) ?? 0) + gained)
-    }
+const countingMask = async (s: string, budget: Budget = newBudget()): Promise<string> => {
+  const out = await maskOrNote(s, budget)
+  for (const [mark, g] of gained(s, out)) {
+    counted += g
+    swaps.set(mark, (swaps.get(mark) ?? 0) + g)
   }
   return out
 }
+
+// Starts (or restarts) the model when the list asks for it or its settings
+// changed, and resets what is known clean whenever anything in the list changed.
+const refreshModel = async ($: EngineInterface) => {
+  const cfg = config
+  if (!cfg) return
+  const cacheFp = `${VERSION}\n${MODEL_VERSION}\n${JSON.stringify(cfg)}`
+  if (cacheFp !== cacheFpLoaded) {
+    cacheFpLoaded = cacheFp
+    cacheReady = (async () => {
+      let salt = await $.store.get(SALT_KEY).catch(() => undefined)
+      if (typeof salt !== 'string') {
+        salt = `${crypto.randomUUID()}${crypto.randomUUID()}`
+        await $.store.set(SALT_KEY, salt).catch(() => {})
+      }
+      await cache.init(salt as string, cacheFp, [])
+      const saved = (await $.store.get(CLEAN_KEY).catch(() => undefined)) as { id?: unknown; hashes?: unknown } | undefined
+      if (saved && saved.id === cache.id && Array.isArray(saved.hashes)) cache.load(saved.hashes.filter((h): h is string => typeof h === 'string'))
+    })().catch(() => {})
+  }
+  if (cfg.enabled === false || cfg.model?.enabled === false) {
+    modelState = 'off'
+    modelReason = null
+    layer = null
+    modelFpLoaded = ''
+    modelPromise = Promise.resolve()
+    return
+  }
+  const modelFp = JSON.stringify({ m: cfg.model ?? {}, keep: cfg.keep ?? [], keepAsIs: cfg.keepAsIs ?? [] })
+  const now = await $.clock.now()
+  if (modelFp === modelFpLoaded && !(modelState === 'broken' && now - modelBrokenAt > MODEL_RETRY_MS)) return
+  modelFpLoaded = modelFp
+  modelState = 'loading'
+  layer = null
+  const mc = cfg.model ?? {}
+  // The words of your home and project folders (your account name, the folder
+  // names): paths name them all the time and they are yours, not a client's.
+  const cwd = await $.session.cwd().catch(() => '')
+  const local = [home, cwd].flatMap(p => p.split(/[^\p{L}\p{N}]+/u)).filter(w => w.length >= 3)
+  modelPromise = loadFinder($, home, mc)
+    .then(async finder => {
+      // Long texts go to the helper process; without Node they are withheld instead.
+      const helper = await externalFinder($, home, mc, t => finder.tokens(t)).catch(() => null)
+      layer = new ModelLayer(finder, helper, {
+        labels: mc.labels ?? DEFAULT_LABELS,
+        maxTokens: mc.maxTokens ?? DEFAULTS.maxTokens,
+        timeoutMs: mc.timeoutMs ?? DEFAULTS.timeoutMs,
+        allow: [...(mc.allow ?? []), ...local, ...(cfg.keepAsIs ?? []), ...(cfg.keep ?? []).filter(k => !k.startsWith('*@'))],
+        marked: t => masker?.marked(t) ?? [],
+      })
+      modelState = 'on'
+      modelReason = null
+    })
+    .catch(async err => {
+      modelState = 'broken'
+      modelReason = err instanceof ModelUnavailable ? err.message : 'the masking model could not be started'
+      modelBrokenAt = await $.clock.now()
+    })
+    .then(() => publish($))
+}
+
+const saveClean = async ($: EngineInterface) => {
+  const hashes = cache.takeSaved()
+  if (hashes) await $.store.set(CLEAN_KEY, { id: cache.id, hashes }).catch(() => {})
+}
+
+// For a hook that failed after the engine answered: a text known clean stands,
+// anything else gives way to the withheld note. Quick, for the 1 s a .catch has.
+const knownCleanOrNote = async (s: string): Promise<string> => {
+  if (!isOn() || s.trim() === '') return s
+  try {
+    if (cache.ready && cache.isClean(await cache.key(s))) return s
+  } catch {
+    // Not known: withheld.
+  }
+  return WITHHELD_NOTE.failed
+}
+
+// How the check before each request went, for /client-mask-model: counts only.
+const coverage = { checked: 0, blocked: 0 }
+
+const modelStopped = () =>
+  `client-mask stopped this: ${modelReason ?? 'the masking model is not running'}. Nothing is sent until it runs; /client-mask-model shows how to fix it.`
 
 // "CLIENT_3 ×2, ‹EMAIL› ×1"
 export const swapSummary = (m: ReadonlyMap<string, number>) =>
@@ -106,6 +260,7 @@ const publish = async ($: EngineInterface) => {
     names: masker?.termCount ?? 0,
     detectors: masker?.detectorCount ?? 0,
     folders: config?.blockedFolders?.length ?? 0,
+    model: modelState,
   }
   const key = JSON.stringify(s)
   if (key === shown) return
@@ -153,11 +308,16 @@ const load = async ($: EngineInterface) => {
       masker = new Masker(config)
       broken = null
       loadedMtime = -1
+      await refreshModel($)
       $.ui.status('🔒 masking personal data; no client names listed yet (/client-mask-edit)')
       return
     }
     const { mtimeMs } = await $.fs.stat(listPath)
-    if ((masker || broken) && mtimeMs === loadedMtime) return
+    if ((masker || broken) && mtimeMs === loadedMtime) {
+      // Same list: only a broken model is worth trying again.
+      if (masker && modelState === 'broken') await refreshModel($)
+      return
+    }
     loadedMtime = mtimeMs
     let parsed: unknown
     try {
@@ -173,6 +333,7 @@ const load = async ($: EngineInterface) => {
     config = parsed as Config
     masker = new Masker(config)
     broken = null
+    await refreshModel($)
     $.ui.status(isOn() ? `🔒 masking ${masker.termCount} client names and ${masker.detectorCount} kinds of personal data` : 'masking off')
   } catch (err) {
     masker = null
@@ -290,13 +451,16 @@ const savedConversations = async ($: EngineInterface, pick: (session: string, mt
 // search) is caught. Each call's argument pieces are held until the call ends,
 // so a name split across pieces is still found; unchanged calls pass as sent.
 type StepChunk = TurnStepChunk
-export const maskToolArgs = async function* (stream: HookStream<StepChunk, TurnStepResult>, m: Masker): AsyncGenerator<StepChunk, TurnStepResult> {
+export const maskToolArgs = async function* (
+  stream: HookStream<StepChunk, TurnStepResult>,
+  mask: (s: string) => Promise<string>,
+): AsyncGenerator<StepChunk, TurnStepResult> {
   let held: { index: number; chunks: StepChunk[]; json: string } | null = null
-  const flush = function* (): Generator<StepChunk> {
+  const flush = async function* (): AsyncGenerator<StepChunk> {
     if (!held) return
     const { index, chunks, json } = held
     held = null
-    const masked = maskArgsJson(json, s => m.mask(s))
+    const masked = await maskArgsJsonAsync(json, mask)
     if (masked === json) yield* chunks
     else yield { kind: 'input', index, json: masked }
   }
@@ -318,10 +482,11 @@ export const maskToolArgs = async function* (stream: HookStream<StepChunk, TurnS
   const r = await stream.result
   // A call with nothing to mask keeps its own object: a call a hook rewrote is
   // not the one auto mode reviewed, so it would be refused.
-  const toolUses = r.toolUses.map(t => {
-    const input = mapStrings(t.input, s => m.mask(s))
-    return JSON.stringify(input) === JSON.stringify(t.input) ? t : { ...t, input }
-  })
+  const toolUses: (typeof r.toolUses)[number][] = []
+  for (const t of r.toolUses) {
+    const input = (await mapStringsAsync(t.input, mask)) as typeof t.input
+    toolUses.push(JSON.stringify(input) === JSON.stringify(t.input) ? t : { ...t, input })
+  }
   return toolUses.every((t, i) => t === r.toolUses[i]) ? r : { ...r, toolUses }
 }
 
@@ -470,6 +635,43 @@ export const maskFolder = async ($: EngineInterface, args: string): Promise<stri
   )
 }
 
+// /client-mask-model: the model's state and counts, and how to install it. The
+// reply reaches the conversation, so it carries counts and file names only.
+export const modelReport = async ($: EngineInterface): Promise<string> => {
+  await ensure($)
+  if (broken) return stopped()
+  if (config?.enabled === false || config?.model?.enabled === false) {
+    return 'The on-device masking model is switched off in your list ("model": {"enabled": false}): only your list and the detectors mask.'
+  }
+  // Asked for its state: a broken model is tried again now.
+  if (modelState === 'broken') {
+    modelFpLoaded = ''
+    await refreshModel($)
+  }
+  await modelPromise
+  const size = config?.model?.size ?? DEFAULTS.size
+  const folder = `~/${MODELS_DIR}/${size}-${MODEL_VERSION}`
+  if (modelState !== 'on' || !layer) {
+    const f = modelFiles(size)
+    const url = modelUrl(size)
+    return [
+      `client-mask: ${modelReason ?? 'the masking model is not running'}. Until it runs, nothing is sent.`,
+      `Install the ${size} model (v${MODEL_VERSION}) in your own terminal; client-mask checks both files against their published SHA-256 before using them:`,
+      `mkdir -p ${folder} && cd ${folder} && curl -fLO ${url}${f.tokenizer} && curl -fL -o ${f.model} ${url}onnx/${f.model}`,
+      'Then run /client-mask-model again. To mask without the model instead, set "model": {"enabled": false} in your list (/client-mask-edit).',
+    ].join('\n')
+  }
+  const s = layer.stats
+  const secs = (s.ms / 1000).toFixed(1)
+  const rate = s.ms > 0 ? Math.round(s.tokens / (s.ms / 1000)) : 0
+  return [
+    `🔒 The on-device masking model is on: newmean-pii ${size} v${MODEL_VERSION}, files checked against their published SHA-256, from ${folder}.`,
+    `Kinds masked: ${(config?.model?.labels ?? DEFAULT_LABELS).length} of ${MODEL_LABELS.length}; sensitivity ${config?.model?.sensitivity ?? DEFAULTS.sensitivity}; texts over ${config?.model?.maxTokens ?? DEFAULTS.maxTokens} tokens or ${(config?.model?.timeoutMs ?? DEFAULTS.timeoutMs) / 1000} s of scanning are held back.`,
+    `This session: ${s.scans} texts scanned (${s.tokens} tokens in ${secs} s, about ${rate} tokens/s), ${s.masked} items masked by the model, ${s.withheld} held back.`,
+    `Known texts: ${cache.hits} found again without scanning, ${cache.misses} new. Checked before sending: ${coverage.checked} parts, ${coverage.blocked} requests stopped.`,
+  ].join('\n')
+}
+
 const scrubHistory = ($: EngineInterface) => (home ? scrubPath($, `${home}/.claude/history.jsonl`) : Promise.resolve())
 
 export const register: Register = on => {
@@ -481,6 +683,7 @@ export const register: Register = on => {
     await $.command.register({ name: EDIT, description: 'Open your masking list in your text editor (Claude never sees it)' })
     await $.command.register({ name: TIDY, description: 'Rewrite your masking list in a tidy, readable layout, locally (Claude never sees it)' })
     await $.command.register({ name: FOLDER, description: 'Mask every text file under a folder on disk by your list, locally; no model is involved' })
+    await $.command.register({ name: MODEL, description: 'Show the on-device masking model: whether it runs, what it has scanned, and how to install it' })
     // Catches conversations that closed without cleaning up (a crash, a forced
     // quit): recent ones, idle long enough that no session still writes them.
     void (async () => {
@@ -518,12 +721,37 @@ export const register: Register = on => {
       $.ui.toast('client-mask stopped this message: pasted pictures cannot be masked. Remove the picture and send it again.', { timeoutMs: 10000 })
       return { text: '' }
     }
+    if (modelWanted() && modelState === 'broken') {
+      $.ui.toast(modelStopped(), { timeoutMs: 10000 })
+      return { text: '' }
+    }
     counted = 0
     swaps.clear()
-    const r = await next({ ...e, text: countingMask(e.text), context: e.context?.map(countingMask) })
+    withheldNow = 0
+    const budget = newBudget()
+    const text = await countingMask(e.text, budget)
+    const context: string[] = []
+    for (const c of e.context ?? []) context.push(await countingMask(c, budget))
+    // Fail closed: what could not be scanned is not sent at all.
+    if (withheldNow > 0) {
+      $.ui.toast(
+        modelState === 'broken'
+          ? modelStopped()
+          : 'client-mask stopped this message: it could not be scanned for personal data in time (too long, or the scan failed). Send it in smaller parts.',
+        { timeoutMs: 10000 },
+      )
+      return { text: '' }
+    }
+    const r = await next({ ...e, text, context: e.context ? context : undefined })
     const n = counted
-    await update($, maskedAtom, () => n)
+    await update($, maskedAtom, () => n).catch(() => {})
     return r
+  }).catch(($, e, next) => {
+    // Fail closed: a hook that failed or ran out of time before passing the
+    // prompt on refuses it; one that had passed it on keeps that masked answer.
+    if (next.called) return next(e)
+    $.ui.toast('client-mask stopped this message: masking it failed or took too long. Send it again, or in smaller parts.', { timeoutMs: 10000 })
+    return { text: '' }
   })
 
   // 2. Every row the conversation keeps: tool results, files you mention,
@@ -532,10 +760,19 @@ export const register: Register = on => {
     await ensure($)
     if (!isOn()) return next(e)
     counted = 0
-    const r = await next({ ...e, message: { ...e.message, content: maskContent(e.message.content, countingMask) as never } })
+    // A piece that cannot be scanned is replaced by a note: the row still
+    // lands, and the model never sees the text.
+    const budget = newBudget()
+    const content = await maskContentAsync(e.message.content, s => countingMask(s, budget))
+    const r = await next({ ...e, message: { ...e.message, content: content as never } })
     const n = counted
-    if (n > 0) await update($, maskedAtom, m => (m ?? 0) + n)
+    if (n > 0) await update($, maskedAtom, m => (m ?? 0) + n).catch(() => {})
     return r
+  }).catch(($, e, next) => {
+    // Fail closed: the row still lands, as a note in place of what could not be masked.
+    if (next.called) return next(e)
+    if (!isOn()) return next(e)
+    return next({ ...e, message: { ...e.message, content: WITHHELD_NOTE.failed as never } })
   })
 
   // 3. The system prompt (instructions files, memory, folder names, git status).
@@ -543,39 +780,65 @@ export const register: Register = on => {
     await ensure($)
     const r = await next(e)
     if (!isOn()) return r
-    return { ...r, sections: r.sections.map(s => ({ ...s, text: mask(s.text) })) }
+    const sections: (typeof r.sections)[number][] = []
+    const budget = newBudget()
+    for (const s of r.sections) sections.push({ ...s, text: await maskOrNote(s.text, budget) })
+    return { ...r, sections }
+  }).catch(async ($, e, next) => {
+    // The engine's answer is unmasked: only what is known clean stands.
+    const r = await next(e)
+    const sections: (typeof r.sections)[number][] = []
+    for (const s of r.sections) sections.push({ ...s, text: await knownCleanOrNote(s.text) })
+    return { ...r, sections }
   })
 
   on('prompt.context', async ($, e, next) => {
     await ensure($)
     const r = await next(e)
     if (!isOn()) return r
-    return { ...r, blocks: r.blocks.map(b => ({ ...b, text: mask(b.text) })) }
+    const blocks: (typeof r.blocks)[number][] = []
+    const budget = newBudget()
+    for (const b of r.blocks) blocks.push({ ...b, text: await maskOrNote(b.text, budget) })
+    return { ...r, blocks }
+  }).catch(async ($, e, next) => {
+    const r = await next(e)
+    const blocks: (typeof r.blocks)[number][] = []
+    for (const b of r.blocks) blocks.push({ ...b, text: await knownCleanOrNote(b.text) })
+    return { ...r, blocks }
   })
 
   on('prompt.attachment', async ($, e, next) => {
     await ensure($)
     const r = await next(e)
-    return isOn() && r.text !== null ? { ...r, text: mask(r.text) } : r
+    return isOn() && r.text !== null ? { ...r, text: await maskOrNote(r.text) } : r
+  }).catch(async ($, e, next) => {
+    const r = await next(e)
+    return r.text !== null ? { ...r, text: await knownCleanOrNote(r.text) } : r
   })
 
   on('skill.prompt', async ($, e, next) => {
     await ensure($)
     const r = await next(e)
-    return isOn() ? { ...r, text: mask(r.text) } : r
+    return isOn() ? { ...r, text: await maskOrNote(r.text) } : r
+  }).catch(async ($, e, next) => {
+    const r = await next(e)
+    return { ...r, text: await knownCleanOrNote(r.text) }
   })
 
   // Tool descriptions, which can come from outside servers.
   on('tool.describe', async ($, e, next) => {
     await ensure($)
     const r = await next(e)
-    return isOn() ? { ...r, description: mask(r.description) } : r
+    return isOn() ? { ...r, description: await maskOrNote(r.description) } : r
+  }).catch(async ($, e, next) => {
+    const r = await next(e)
+    return { ...r, description: await knownCleanOrNote(r.description) }
   })
 
   on('session.send', async ($, e, next) => {
     await ensure($)
-    return next({ ...e, text: mask(e.text) })
-  })
+    return next({ ...e, text: isOn() ? await maskOrNote(e.text) : e.text })
+  }).catch(($, e, next) => (next.called ? next(e) : isOn() ? next({ ...e, text: WITHHELD_NOTE.failed }) : next(e)))
 
   // 4. Tools. The list's folder is off limits. Local tools get the real values
   // back so files and commands work; anything that leaves the machine (web,
@@ -657,14 +920,45 @@ export const register: Register = on => {
     // written by the model from what it was already sent. Only the newest is new.
     if (e.messageCount < from) from = Math.max(0, e.messageCount - 1)
     if (broken) note = stopped()
+    else if (modelWanted() && modelState === 'broken') note = modelStopped()
     else if (isOn() && masker && config?.onLeak !== 'off') {
       const messages = e.agentId ? await $.session.messages({ as: 'api', agentId: e.agentId }) : await $.session.messages({ as: 'api' })
       // Only what was added since the last request: earlier messages, sent while
       // masking was off or before a name joined the list, already reached the model.
-      const hits = Array.isArray(messages) ? masker.leaks(scannable(messages.slice(from))) : []
-      if (hits.length > 0) {
+      // Every piece must be one masking leaves as it is: a piece the mod masked
+      // on the way in is known by its hash and passes at once; any other is
+      // masked now, and if that changes it, it held something unmasked.
+      const pieces = Array.isArray(messages) ? scannable(messages.slice(from)) : []
+      const hits = new Set<string>()
+      let unscanned = 0
+      // turn.step's own time is summed over the whole response, tool arguments
+      // included: the check keeps well inside it and leaves long texts to the helper.
+      const budget = newBudget(4000)
+      for (const p of pieces) {
+        let r: Scan
+        try {
+          r = await maskFull(p, budget)
+        } catch {
+          unscanned++
+          continue
+        }
+        if (r.withheld) unscanned++
+        else if (r.text !== p) {
+          // Any change is a hit; a name removed altogether leaves no mark to name.
+          const g = gained(p, r.text)
+          if (g.size === 0) hits.add(REMOVED)
+          for (const mark of g.keys()) hits.add(mark)
+        }
+      }
+      coverage.checked += pieces.length
+      if (unscanned > 0) {
         note =
-          `client-mask stopped this request: the name behind ${hits.join(', ')} is in clear text in what was about to be sent. ` +
+          `client-mask stopped this request: ${unscanned === 1 ? 'one part' : `${unscanned} parts`} of what was about to be sent could not be scanned for personal data. ` +
+          (modelState === 'broken' ? modelStopped() : 'Ask for a smaller part of what you need, then send your message again.')
+      } else if (hits.size > 0) {
+        coverage.blocked++
+        note =
+          `client-mask stopped this request: what was about to be sent holds unmasked ${[...hits].join(', ')}. ` +
           'Send your message again; if this repeats, close Claude Code and reopen this conversation: its saved copy is cleaned as it closes.'
         if (config?.onLeak === 'warn') {
           $.ui.toast(note, { timeoutMs: 10000 })
@@ -676,9 +970,23 @@ export const register: Register = on => {
       const count = e.messageCount
       await update($, sentAtom, m => ({ ...(m ?? {}), [loop]: count }))
       if (!isOn() || !masker) return yield* next(e)
-      return yield* maskToolArgs(next(e), masker)
+      // Each tool call's arguments: a small share of the step's time, the rest to the helper.
+      // The model's own tool calls (commands, edits, briefs) are masked by your
+      // list and the detectors only: the model read nothing unmasked, and
+      // running the on-device model here labelled paths and code, which the
+      // label guard then refused. What comes back still goes through the model.
+      return yield* maskToolArgs(next(e), async s => (isOn() && masker ? masker.mask(s) : s))
     }
     $.ui.toast(note, { timeoutMs: 10000 })
+    yield { kind: 'text', index: 0, text: note }
+    yield { kind: 'stop', stopReason: 'end_turn', usage: null }
+    return { turnId: e.turnId, index: e.index, answer: note, toolUses: [], stopReason: 'end_turn', usage: null }
+  }).catch(async function* ($, e, next) {
+    // Fail closed: a check that failed or ran out of time before the request
+    // went stops it. Once it had gone, the response carries on as it came.
+    if (next.called) return yield* next(e)
+    if (!isOn()) return yield* next(e)
+    const note = 'client-mask stopped this request: the check for unmasked personal data failed or took too long. Send your message again.'
     yield { kind: 'text', index: 0, text: note }
     yield { kind: 'stop', stopReason: 'end_turn', usage: null }
     return { turnId: e.turnId, index: e.index, answer: note, toolUses: [], stopReason: 'end_turn', usage: null }
@@ -697,9 +1005,12 @@ export const register: Register = on => {
 
   on('command.run', { command: FOLDER }, async ($, e) => ({ text: await maskFolder($, e.args) }))
 
+  on('command.run', { command: MODEL }, async $ => ({ text: await modelReport($) }))
+
   // After each answer, a pop-up naming what was masked, by placeholder only.
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    await saveClean($)
     if (!e.agentId && isOn() && swaps.size > 0) {
       $.ui.toast(`🔒 Masked: ${swapSummary(swaps)}`, { timeoutMs: 8000 })
     }
@@ -756,8 +1067,15 @@ export const register: Register = on => {
       $.ui.toast(await openList($), { timeoutMs: 6000 })
     }
     const sep = <Text dimColor>{'  ·  '}</Text>
+    const modelNote = s.model === 'on' ? '  ·  model on' : s.model === 'loading' ? '  ·  model starting' : s.model === 'off' ? '  ·  model off' : ''
     const mine =
-      s.level === 'broken' ? (
+      s.level === 'on' && s.model === 'broken' ? (
+        <Box flexDirection="row">
+          <Text color="error">⛔ Masking model is not running: nothing will be sent (/client-mask-model)</Text>
+          {sep}
+          <Button key="edit" label="✎ edit list" plain dimColor onPress={editList} />
+        </Box>
+      ) : s.level === 'broken' ? (
         <Box flexDirection="row">
           <Text color="error">⛔ Masking list has a problem: nothing will be sent</Text>
           {sep}
@@ -782,6 +1100,7 @@ export const register: Register = on => {
           <Text dimColor>
             {`  ·  ${plural(s.names, 'name')}  ·  ${plural(s.detectors, 'kind')} of personal data  ·  list locked` +
               (s.folders > 0 ? `  ·  ${plural(s.folders, 'folder')} blocked` : '') +
+              modelNote +
               `  ·  last message: ${n} masked`}
           </Text>
           {sep}

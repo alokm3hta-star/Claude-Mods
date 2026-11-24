@@ -1,5 +1,7 @@
 import { DEFAULT_KEEP, Detector, LABEL } from './detect'
 import type { Detect } from './detect'
+import { validateModel } from './model'
+import type { ModelConfig } from './model'
 
 // Pure masking logic: no engine calls, so it is testable on its own.
 // You choose every placeholder yourself, so the same name always becomes the
@@ -68,6 +70,10 @@ export type Config = {
   // else is never rewritten, and what Claude reads from it is still masked on
   // the way in. "keepOnDisk" still wins inside them.
   maskOnDiskIn?: string[]
+  // The on-device model, which masks names, companies, addresses, IDs and the
+  // like that are on no list (one way, as ‹PERSON›…). On unless "enabled":
+  // false; while it cannot run, nothing is sent.
+  model?: ModelConfig
   terms: Entry[]
 }
 
@@ -88,6 +94,7 @@ export const validate = (config: unknown): string[] => {
   if (c.maskOnDiskIn !== undefined && !strings(c.maskOnDiskIn)) problems.push('the list\'s "maskOnDiskIn" must be a list of folder paths')
   if (c.keepAsIs !== undefined && !strings(c.keepAsIs)) problems.push('the list\'s "keepAsIs" must be a list of placeholders')
   if (c.detect !== undefined && (typeof c.detect !== 'object' || c.detect === null)) problems.push('the list\'s "detect" must be an object of true/false switches')
+  problems.push(...validateModel(c.model))
   const realTo = new Map<string, string>()
   c.terms.forEach((t, i) => {
     const row = `row ${i + 1}`
@@ -245,6 +252,15 @@ export class Masker {
     return text.replace(this.known, ph => this.back.get(ph) ?? ph)
   }
 
+  // Where a text already carries a placeholder or a label: ranges the model
+  // never masks again.
+  marked(text: string): [number, number][] {
+    const out: [number, number][] = []
+    if (this.known) for (const m of text.matchAll(this.known)) out.push([m.index ?? 0, (m.index ?? 0) + m[0].length])
+    for (const m of text.matchAll(/‹[A-Z_]+›/g)) out.push([m.index ?? 0, (m.index ?? 0) + m[0].length])
+    return out
+  }
+
   // How many placeholders and labels a text carries, to count what was masked.
   marks(text: string): number {
     return (this.known ? (text.match(this.known)?.length ?? 0) : 0) + (text.match(/‹[A-Z_]+›/g)?.length ?? 0)
@@ -385,6 +401,71 @@ export const maskContent = (content: unknown, mask: (s: string) => string): unkn
   if (typeof content === 'string') return mask(content)
   if (Array.isArray(content)) return (content as Block[]).map(b => maskBlock(b, mask))
   return content
+}
+
+// The same walks, for a mask that has to wait (the on-device model). Strings
+// are masked one after another, never all at once.
+export const mapStringsAsync = async (value: unknown, fn: (s: string) => Promise<string>): Promise<unknown> => {
+  if (typeof value === 'string') return fn(value)
+  if (Array.isArray(value)) {
+    const out: unknown[] = []
+    for (const v of value) out.push(await mapStringsAsync(v, fn))
+    return out
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) out[k] = await mapStringsAsync(v, fn)
+    return out
+  }
+  return value
+}
+
+export const maskBlockAsync = async (b: Block, mask: (s: string) => Promise<string>): Promise<Block> => {
+  switch (b.type) {
+    case 'text':
+      return typeof b.text === 'string' ? { ...b, text: await mask(b.text) } : b
+    case 'tool_use':
+      return { ...b, input: await mapStringsAsync(b.input, mask) }
+    case 'tool_result': {
+      if (typeof b.content === 'string') return { ...b, content: await mask(b.content) }
+      if (!Array.isArray(b.content)) return b
+      const out: Block[] = []
+      for (const c of b.content as Block[]) out.push(await maskBlockAsync(c, mask))
+      return { ...b, content: out }
+    }
+    case 'document': {
+      const src = b.source as { type?: string; data?: unknown } | undefined
+      return src?.type === 'text' && typeof src.data === 'string' ? { ...b, source: { ...src, data: await mask(src.data) } } : b
+    }
+    default:
+      return b
+  }
+}
+
+export const maskContentAsync = async (content: unknown, mask: (s: string) => Promise<string>): Promise<unknown> => {
+  if (typeof content === 'string') return mask(content)
+  if (!Array.isArray(content)) return content
+  const out: Block[] = []
+  for (const b of content as Block[]) out.push(await maskBlockAsync(b, mask))
+  return out
+}
+
+// maskArgsJson for a mask that has to wait.
+export const maskArgsJsonAsync = async (json: string, mask: (s: string) => Promise<string>): Promise<string> => {
+  if (json.trim() === '') return json
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return mask(json)
+  }
+  let changed = false
+  const out = await mapStringsAsync(parsed, async s => {
+    const m = await mask(s)
+    if (m !== s) changed = true
+    return m
+  })
+  return changed ? JSON.stringify(out) : json
 }
 
 // A tool call's arguments as the model streams them, JSON text: masked value by
