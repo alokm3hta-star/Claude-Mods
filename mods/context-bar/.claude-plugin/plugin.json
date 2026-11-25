@@ -1,9 +1,24 @@
 {
   "name": "context-bar",
-  "version": "0.4.1",
-  "description": "Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm",
+  "version": "0.9.0",
+  "description": "Context fill as a bar above the prompt, with prompt-cache hit rate, whether the cache is still warm, and how much of your plan is left when it runs low (helpers are never held for plan usage); past its hand-over point (55% for a helper, 60% for a Core; in SolveFoundry a Core's context.coreHandoffAt and a builder's context.helperPauseAt, with a no-new-job reminder from context.helperStopAt) a session is reminded each turn and may not start helpers or sessions, except a Core whose context.coreRoom is not rotation, which cuts back instead",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Alok Mehta"
+  },
+  "userConfig": {
+    "helperFloor": {
+      "type": "string",
+      "title": "Show plan left below twice this %",
+      "description": "The plan left shows once the five-hour or weekly window is below twice this share, in red below it. Helpers are never held for plan usage.",
+      "default": "20",
+      "options": [
+        "10",
+        "15",
+        "20",
+        "25",
+        "30"
+      ]
+    }
   }
 }
