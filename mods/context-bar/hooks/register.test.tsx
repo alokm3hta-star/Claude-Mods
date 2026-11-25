@@ -1,6 +1,6 @@
 import { test, expect } from 'claude-code/testing'
 
-import { bar, cacheFrom, cacheState, colourFor, hitRate, isCore, limitFor, lowest, minutesLeft, pastLimit, planColour, planWorthShowing, roleLabel, toPlan } from './register'
+import { bar, cacheFrom, cacheState, colourFor, cutsBack, hitRate, isCore, limitFor, lowest, minutesLeft, pastLimit, planColour, planWorthShowing, pointsFrom, roleLabel, toPlan } from './register'
 
 test('bar fills in proportion to the percentage', async () => {
   expect(bar(0, 10)).toBe('░░░░░░░░░░')
@@ -351,3 +351,101 @@ for (const helperFloor of ['-1', '10', '30']) {
     expect(ran).toBe(1)
   })
 }
+
+// SolveFoundry's settings beneath the project root, as the engine would read them; a test stands in for the file.
+const settings = (on: any, context: Record<string, unknown>) => {
+  on('session.root', () => ({ value: '/sf' }) as never)
+  on('fs.read', ($: any, e: any) =>
+    (e.path === '/sf/setup/config.json'
+      ? { value: JSON.stringify({ framework: { name: 'SolveFoundry' }, context: { coreHandoffAt: 20, ...context } }) }
+      : { error: 'no such file' }) as never)
+}
+
+test('context.coreRoom is read from SolveFoundry settings; missing or unknown is cutback', async () => {
+  const sf = (context: Record<string, unknown>) => JSON.stringify({ framework: { name: 'SolveFoundry' }, context })
+  expect(pointsFrom(sf({ coreRoom: 'rotation' })).coreRoom).toBe('rotation')
+  expect(pointsFrom(sf({ coreRoom: 'cutback' })).coreRoom).toBe('cutback')
+  expect(pointsFrom(sf({ coreRoom: 'cutback-summary' })).coreRoom).toBe('cutback-summary')
+  expect(pointsFrom(sf({})).coreRoom).toBe('cutback')
+  expect(pointsFrom(sf({ coreRoom: 'spare' })).coreRoom).toBe('cutback')
+  // Outside SolveFoundry the old hand-over holds.
+  expect(pointsFrom(JSON.stringify({ context: { coreRoom: 'cutback' } })).coreRoom).toBe('rotation')
+  expect(pointsFrom(null).coreRoom).toBe('rotation')
+  expect(cutsBack('Core 1', pointsFrom(sf({})))).toBe(true)
+  expect(cutsBack('Builder 3', pointsFrom(sf({})))).toBe(false)
+  expect(cutsBack('Core 1', pointsFrom(sf({ coreRoom: 'rotation' })))).toBe(false)
+})
+
+for (const room of ['cutback', 'cutback-summary', undefined] as const) {
+  test(`a Core past its point under coreRoom ${room ?? '(unset)'} gets no hand-over reminder`, async ($, on) => {
+    engine(on)
+    callsThrough(on)
+    titled(on, 'Core 1 - Active')
+    settings(on, room ? { coreRoom: room } : {})
+    const seen = echoPrompt(on)
+    await fillAt($, 25)
+    await $.prompt.submit({ text: 'next' } as never)
+    expect(seen.at(-1) ?? []).toEqual([])
+  })
+}
+
+test('a Core past its point under cutback may still start helpers and sessions', async ($, on) => {
+  engine(on)
+  const ran = callsThrough(on)
+  titled(on, 'Core 1 - Active')
+  settings(on, { coreRoom: 'cutback' })
+  await fillAt($, 25)
+  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as never)
+  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
+  expect(ran).toEqual(['Agent', 'mcp__ccd_session__start_session'])
+})
+
+test('a Core past its point under cutback shows "cut back", not "hand over now"', async ($, on) => {
+  engine(on)
+  callsThrough(on)
+  titled(on, 'Core 1 - Active')
+  settings(on, { coreRoom: 'cutback' })
+  emptyBand(on)
+  await fillAt($, 25)
+  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'context-bar', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 100 } as never })
+    expect(await ui.find({ type: 'Text', text: /Core, limit 20/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /cut back/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /hand over now/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('under rotation a Core past its point is reminded, held and shown "hand over now", as before', async ($, on) => {
+  engine(on)
+  const ran = callsThrough(on)
+  titled(on, 'Core 1 - Active')
+  settings(on, { coreRoom: 'rotation' })
+  emptyBand(on)
+  const seen = echoPrompt(on)
+  await fillAt($, 25)
+  const held = await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
+  expect(JSON.stringify(held)).toContain('hand over')
+  expect(ran).toEqual([])
+  await $.prompt.submit({ text: 'next' } as never)
+  expect(seen.at(-1)).toEqual(['Context at 25 per cent: hand over now (ways-of-working, Context checkpoint)'])
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: /hand over now/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /cut back/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('under cutback a helper past its point is still reminded and held', async ($, on) => {
+  engine(on)
+  const ran = callsThrough(on)
+  titled(on, 'Mail Builder 3')
+  settings(on, { coreRoom: 'cutback', helperStopAt: 40, helperPauseAt: 50 })
+  const seen = echoPrompt(on)
+  await fillAt($, 50)
+  const held = await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as never)
+  expect(JSON.stringify(held)).toContain('hand over')
+  expect(ran).toEqual([])
+  await $.prompt.submit({ text: 'next' } as never)
+  expect(seen.at(-1)).toEqual(['Context at 50 per cent: hand over now (ways-of-working, Context checkpoint)'])
+})

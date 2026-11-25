@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CoreEngineInterface, Register } from 'claude-code'
 
-import type { Cache, Fill, Plan, Points } from '../types'
+import type { Cache, CoreRoom, Fill, Plan, Points } from '../types'
 
 // How long the prompt cache lives after the last request. This session runs on
 // the 1-hour cache; set to 5 for the standard API cache.
@@ -45,25 +45,34 @@ const FRAMEWORK = 'SolveFoundry'
 const POINT_MIN = 15
 const POINT_MAX = 90
 
-// Outside SolveFoundry, or with its settings unreadable, the old points hold, so the notice never goes quiet.
-const DEFAULT_POINTS: Points = { stopAt: null, pauseAt: HELPER_LIMIT, coreAt: CORE_LIMIT }
+// How a SolveFoundry Core meets its point (context.coreRoom): under `rotation` it hands over to a spare Core, as
+// before; under `cutback` (the framework's default) or `cutback-summary` it cuts its own conversation back, and
+// SolveFoundry's hooks/cores.py gives that reminder, so this mod neither reminds nor holds it.
+const CORE_ROOMS: readonly CoreRoom[] = ['cutback', 'rotation', 'cutback-summary']
+const DEFAULT_CORE_ROOM: CoreRoom = 'cutback'
+
+// Outside SolveFoundry, or with its settings unreadable, the old points and the hand-over hold, so the notice never
+// goes quiet.
+const DEFAULT_POINTS: Points = { stopAt: null, pauseAt: HELPER_LIMIT, coreAt: CORE_LIMIT, coreRoom: 'rotation' }
 
 const isPoint = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= POINT_MIN && v <= POINT_MAX
 
 // The points from the text of SolveFoundry's settings file: DEFAULT_POINTS for another project's file or one that
 // cannot be read. A builder's two points that are missing, out of range or out of order keep the helper default, and
-// a Core's point that is missing or out of range keeps the Core default.
-const pointsFrom = (text: string | null): Points => {
+// a Core's point that is missing or out of range keeps the Core default. A coreRoom that is missing or unknown is
+// the framework's default, cutback.
+export const pointsFrom = (text: string | null): Points => {
   if (!text) return DEFAULT_POINTS
   try {
     const settings = JSON.parse(text) as {
       framework?: { name?: unknown }
-      context?: { helperStopAt?: unknown; helperPauseAt?: unknown; coreHandoffAt?: unknown }
+      context?: { helperStopAt?: unknown; helperPauseAt?: unknown; coreHandoffAt?: unknown; coreRoom?: unknown }
     }
     if (settings.framework?.name !== FRAMEWORK) return DEFAULT_POINTS
-    const { helperStopAt: stopAt, helperPauseAt: pauseAt, coreHandoffAt: coreAt } = settings.context ?? {}
+    const { helperStopAt: stopAt, helperPauseAt: pauseAt, coreHandoffAt: coreAt, coreRoom: room } = settings.context ?? {}
     const helper = isPoint(stopAt) && isPoint(pauseAt) && stopAt <= pauseAt ? { stopAt, pauseAt } : DEFAULT_POINTS
-    return { stopAt: helper.stopAt, pauseAt: helper.pauseAt, coreAt: isPoint(coreAt) ? coreAt : CORE_LIMIT }
+    const coreRoom = CORE_ROOMS.find(r => r === room) ?? DEFAULT_CORE_ROOM
+    return { stopAt: helper.stopAt, pauseAt: helper.pauseAt, coreAt: isPoint(coreAt) ? coreAt : CORE_LIMIT, coreRoom }
   } catch {
     return DEFAULT_POINTS
   }
@@ -76,6 +85,13 @@ export const limitFor = (sessionTitle: string | null, p: Points = DEFAULT_POINTS
 // No context reading fails open: nothing is held.
 export const pastLimit = (f: Fill | null, sessionTitle: string | null, p: Points = DEFAULT_POINTS) =>
   f !== null && f.percent >= limitFor(sessionTitle, p)
+// A Core that cuts its own conversation back at its point instead of handing over: no hand-over reminder or hold.
+// Points an earlier version stored carry no coreRoom, and keep the hand-over.
+export const cutsBack = (sessionTitle: string | null, p: Points = DEFAULT_POINTS) =>
+  isCore(sessionTitle) && (p.coreRoom === 'cutback' || p.coreRoom === 'cutback-summary')
+// Past the point and due to hand over: every session past it but a Core that cuts back.
+const handsOver = (f: Fill | null, sessionTitle: string | null, p: Points = DEFAULT_POINTS) =>
+  pastLimit(f, sessionTitle, p) && !cutsBack(sessionTitle, p)
 // A titled helper between its two SolveFoundry points: it finishes its job, starting helpers as it needs, and takes
 // no new one.
 const noNewJob = (f: Fill | null, sessionTitle: string | null, p: Points = DEFAULT_POINTS) =>
@@ -239,7 +255,7 @@ export const register: Register = (on, options) => {
       const sessionPoints = f ? await refreshPoints($) : DEFAULT_POINTS
       if (f && f.percent >= firstPoint(sessionPoints)) {
         await refreshTitle($)
-        if (pastLimit(f, await read($, title), sessionPoints)) {
+        if (handsOver(f, await read($, title), sessionPoints)) {
           return {
             deny: `context-bar: ${reminder(f.percent)}. Do not start a helper or session from here: write your handoff or PAUSED.md and pass the work on (SendMessage to your coordinator, or the handoff playbook if you are a Core).`,
           }
@@ -257,7 +273,7 @@ export const register: Register = (on, options) => {
     if (f.percent < firstPoint(sessionPoints)) return next(e)
     await refreshTitle($)
     const sessionTitle = await read($, title)
-    const words = pastLimit(f, sessionTitle, sessionPoints) ? reminder(f.percent) : noNewJob(f, sessionTitle, sessionPoints) ? stopReminder(f.percent) : null
+    const words = handsOver(f, sessionTitle, sessionPoints) ? reminder(f.percent) : noNewJob(f, sessionTitle, sessionPoints) ? stopReminder(f.percent) : null
     return words === null ? next(e) : next({ ...e, context: [...(e.context ?? []), words] })
   })
 
@@ -302,7 +318,8 @@ export const register: Register = (on, options) => {
     const pct = f?.percent ?? 0
     const sessionTitle = await read($, title)
     const sessionPoints = (await read($, points)) ?? DEFAULT_POINTS
-    const handOver = pastLimit(f, sessionTitle, sessionPoints)
+    const handOver = handsOver(f, sessionTitle, sessionPoints)
+    const cutBack = pastLimit(f, sessionTitle, sessionPoints) && cutsBack(sessionTitle, sessionPoints)
     const stopping = noNewJob(f, sessionTitle, sessionPoints)
     const barColour = colourFor(pct, limitFor(sessionTitle, sessionPoints))
     const left = c ? minutesLeft(c, t) : 0
@@ -317,6 +334,7 @@ export const register: Register = (on, options) => {
         <Text> {f ? `${pct}% (${k(f.tokens)}/${k(f.window)})` : 'no reading yet'}</Text>
         <Text dimColor>  ({roleLabel(sessionTitle, sessionPoints)})</Text>
         {handOver ? <Text color="error">  hand over now</Text> : null}
+        {cutBack ? <Text color="warning">  cut back</Text> : null}
         {stopping ? <Text color="warning">  no new job</Text> : null}
         <Text dimColor>  ·  Cache hit </Text>
         <Text>{rate === null ? '–' : `${rate}%`}</Text>
