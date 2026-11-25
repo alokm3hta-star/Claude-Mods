@@ -10,7 +10,7 @@ installs any of them.
 | Mod | What it does |
 | --- | --- |
 | [client-mask](mods/client-mask) | Mask client names, personal data and secrets before anything leaves this machine; keep the list private and leave no trace of what was swapped |
-| [context-bar](mods/context-bar) | Context fill as a bar above the prompt, with prompt-cache hit rate and whether the cache is still warm |
+| [context-bar](mods/context-bar) | Context fill as a bar above the prompt, with prompt-cache hit rate, whether the cache is still warm, and how much of your plan is left when it runs low (helpers are never held for plan usage); past its hand-over point (55% for a helper, 60% for a Core; in SolveFoundry a Core's context.coreHandoffAt and a builder's context.helperPauseAt, with a no-new-job reminder from context.helperStopAt) a session is reminded each turn and may not start helpers or sessions |
 | [control-panel](mods/control-panel) | Click instead of remembering: a panel of each project's own commands and playbooks, what needs you now, a wiki desk for reading proposals and findings, and where you left off. It never changes how your agents work. |
 | [git-guard](mods/git-guard) | Keep Claude out of your git history: no co-author trailer, no PR footer, and no push of a commit that carries one |
 | [house-style](mods/house-style) | Hold documents Claude writes to your house style: no dashes, British spelling, none of your banned words. It enforces the author's own style: see the note below the table. |
