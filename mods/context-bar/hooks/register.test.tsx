@@ -389,33 +389,37 @@ for (const room of ['cutback', 'cutback-summary', undefined] as const) {
   })
 }
 
-test('a Core past its point under cutback may still start helpers and sessions', async ($, on) => {
-  engine(on)
-  const ran = callsThrough(on)
-  titled(on, 'Core 1 - Active')
-  settings(on, { coreRoom: 'cutback' })
-  await fillAt($, 25)
-  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as never)
-  await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
-  expect(ran).toEqual(['Agent', 'mcp__ccd_session__start_session'])
-})
+for (const room of ['cutback', 'cutback-summary', undefined] as const) {
+  test(`a Core past its point under coreRoom ${room ?? '(unset)'} may still start helpers and sessions`, async ($, on) => {
+    engine(on)
+    const ran = callsThrough(on)
+    titled(on, 'Core 1 - Active')
+    settings(on, room ? { coreRoom: room } : {})
+    await fillAt($, 25)
+    await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as never)
+    await $.tool.call({ tool: 'Task', description: 'x', prompt: 'y' } as never)
+    await $.tool.call({ tool: 'Workflow', script: 'x' } as never)
+    await $.tool.call({ tool: 'mcp__ccd_session__start_session', title: 'x' } as never)
+    expect(ran).toEqual(['Agent', 'Task', 'Workflow', 'mcp__ccd_session__start_session'])
+  })
 
-test('a Core past its point under cutback shows "cut back", not "hand over now"', async ($, on) => {
-  engine(on)
-  callsThrough(on)
-  titled(on, 'Core 1 - Active')
-  settings(on, { coreRoom: 'cutback' })
-  emptyBand(on)
-  await fillAt($, 25)
-  await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as never)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'context-bar', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 100 } as never })
-    expect(await ui.find({ type: 'Text', text: /Core, limit 20/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /cut back/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /hand over now/ })).toBeUndefined()
-    await ui.unmount()
-  }
-})
+  test(`a Core past its point under coreRoom ${room ?? '(unset)'} shows "cut back", not "hand over now"`, async ($, on) => {
+    engine(on)
+    callsThrough(on)
+    titled(on, 'Core 1 - Active')
+    settings(on, room ? { coreRoom: room } : {})
+    emptyBand(on)
+    await fillAt($, 25)
+    await $.tool.call({ tool: 'Agent', description: 'x', prompt: 'y' } as never)
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const ui = await $.ui.mount({ plugin: 'context-bar', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 10, columns: 100 } as never })
+      expect(await ui.find({ type: 'Text', text: /Core, limit 20/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /cut back/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /hand over now/ })).toBeUndefined()
+      await ui.unmount()
+    }
+  })
+}
 
 test('under rotation a Core past its point is reminded, held and shown "hand over now", as before', async ($, on) => {
   engine(on)
